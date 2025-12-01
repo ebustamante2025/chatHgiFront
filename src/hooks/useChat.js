@@ -12,7 +12,9 @@ import {
 } from "../api";
 
 // URL del WebSocket
-const WS_URL = "ws://localhost:4000/ws";
+//const WS_URL = "ws://localhost:4000/ws";
+const WS_URL = "ws://chat.hginet.com.co:4000/ws";
+
 
 // Helper: genera una clave única por conversación
 export const getConversationKey = (type, id) => `${type}:${id}`;
