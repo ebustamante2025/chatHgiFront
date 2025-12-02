@@ -1,6 +1,6 @@
 //const API_URL = "http://localhost:4000";
 //const API_URL = "https://chat.hginet.com.co:4000"
-const API_URL = "https://chat.hginet.com.co/api";
+const API_URL = "https://chat.hginet.com.co";
 
 // Registramos usuarios
 export async function register(username, password) {
