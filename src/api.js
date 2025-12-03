@@ -2,7 +2,6 @@
 //const API_URL = "https://chat.hginet.com.co:4000"
 const API_URL = "https://backchat.hginet.com.co";
 
-// Registramos usuarios
 export async function register(username, password) {
   const res = await fetch(`${API_URL}/api/register`, {
     method: "POST",  // usamos POST para crear el usuario
