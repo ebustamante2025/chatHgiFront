@@ -14,7 +14,7 @@ import {
 // URL del WebSocket
 //const WS_URL = "ws://localhost:4000/ws";
 //const WS_URL = "ws://chat.hginet.com.co:4000/ws";
-const WS_URL = "ws://backchat.hginet.com.co/ws";
+const WS_URL = "wss://backchat.hginet.com.co/ws";
 
 
 // Helper: genera una clave única por conversación
