@@ -1,0 +1,718 @@
+/* src/styles/chat.css */
+
+/* Reset básico */
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen,
+    Ubuntu, Cantarell, "Open Sans", "Helvetica Neue", sans-serif;
+}
+
+.contenedor {
+  width: 100%;
+  height: 100vh;
+  min-height: 100vh;
+  max-height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: #f3f4f6;
+  padding: 0;
+  margin: 0;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+/* Desktop: contenedor en pantalla completa */
+@media (min-width: 769px) {
+  .contenedor {
+    width: 100%;
+    height: 100vh;
+    min-height: 100vh;
+    max-height: 100vh;
+    padding: 0;
+    background: white;
+    align-items: flex-start;
+    justify-content: flex-start;
+  }
+}
+
+/* Móvil: contenedor en pantalla completa */
+@media (max-width: 768px) {
+  .contenedor {
+    width: 100%;
+    height: 100vh;
+    min-height: 100vh;
+    max-height: 100vh;
+    padding: 0;
+    background: white;
+    align-items: flex-start;
+    justify-content: flex-start;
+  }
+}
+
+.app {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  height: 100vh;
+  min-height: 100vh;
+  max-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: white;
+  border-radius: 0;
+  box-shadow: none;
+  overflow: hidden;
+  border: none;
+  margin: 0;
+}
+
+/* Ajustes para pantallas muy pequeñas */
+@media (max-width: 320px) {
+  .app {
+    min-height: 100vh;
+  }
+}
+
+
+
+/* Desktop: siempre mostrar panel lateral y área de chat lado a lado */
+@media (min-width: 769px) {
+  .app .barra-lateral {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .app .area-chat {
+    display: flex;
+  }
+}
+
+/* Encabezado */
+.encabezado {
+  height: 56px;
+  min-height: 56px;
+  background: #2563eb;
+  color: white;
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+/* Cuerpo principal */
+.cuerpo {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+}
+
+/* Desktop: asegurar que el cuerpo use todo el espacio */
+@media (min-width: 769px) {
+  .cuerpo {
+    flex: 1;
+    height: calc(100vh - 56px);
+    min-height: calc(100vh - 56px);
+    max-height: calc(100vh - 56px);
+  }
+}
+
+
+/* Barra lateral */
+.barra-lateral {
+  width: 300px;
+  min-width: 250px;
+  max-width: 350px;
+  border-right: 1px solid #e5e7eb;
+  padding: 16px;
+  overflow-y: auto;
+  flex-shrink: 0;
+  background: #ffffff;
+  height: 100%;
+}
+
+/* Desktop: ajustar barra lateral para pantalla completa */
+@media (min-width: 769px) {
+  .barra-lateral {
+    max-height: calc(100vh - 56px);
+    height: calc(100vh - 56px);
+  }
+}
+
+/* Tablets: ajustar ancho de barra lateral */
+@media (min-width: 769px) and (max-width: 1024px) {
+  .barra-lateral {
+    width: 260px;
+    min-width: 220px;
+    max-width: 280px;
+  }
+}
+
+/* Área de chat */
+.area-chat {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+  min-width: 0;
+  background: #ffffff;
+  position: relative;
+  height: 100%;
+}
+
+/* Desktop: ajustar altura de área de chat para pantalla completa */
+@media (min-width: 769px) {
+  .area-chat {
+    flex: 1;
+    height: calc(100vh - 56px);
+    min-height: calc(100vh - 56px);
+    max-height: calc(100vh - 56px);
+  }
+}
+
+
+/* Listas */
+.contenedor-lista {
+  max-height: 180px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.lista-usuarios {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.item-usuario {
+  padding: 8px 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 4px;
+  font-size: 14px;
+  border: 1px solid transparent;
+  margin-bottom: 2px;
+  transition: background-color 0.2s, border-color 0.2s;
+}
+
+.item-usuario:hover {
+  background-color: #f3f4f6;
+  border-color: #d1d5db;
+}
+
+.item-usuario.seleccionado {
+  background-color: #e0f2ff;
+  border-color: #2563eb;
+}
+
+.punto-estado {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+/* Encabezado del chat */
+.encabezado-chat {
+  flex-shrink: 0;
+  padding: 12px;
+  border-bottom: 1px solid #e5e7eb;
+  background: #f9fafb;
+}
+
+/* Mensajes */
+.mensajes {
+  flex: 1;
+  min-height: 0;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: #f3f4f6;
+}
+
+/* Desktop: asegurar que los mensajes usen todo el espacio disponible */
+@media (min-width: 769px) {
+  .mensajes {
+    flex: 1;
+    min-height: 0;
+    height: 100%;
+  }
+}
+
+.mensaje {
+  max-width: 400px;
+  min-width: 100px;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid #e5e7eb;
+  background: white;
+  font-size: 14px;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+.mensaje.propio {
+  align-self: flex-end;
+  background-color: #dcf8c6;
+}
+
+.mensaje.ajeno {
+  align-self: flex-start;
+  background-color: #ffffff;
+}
+
+.escribiendo {
+  font-size: 12px;
+  opacity: 0.7;
+  font-style: italic;
+  padding: 2px 8px;
+}
+
+/* Barra de entrada */
+.barra-entrada {
+  flex-shrink: 0;
+  padding: 12px 16px;
+  border-top: 1px solid #e5e7eb;
+  display: flex;
+  gap: 12px;
+  background: #f9fafb;
+  align-items: center;
+}
+
+.input-flex {
+  flex: 1;
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid #d1d5db;
+  font-size: 14px;
+  outline: none;
+}
+
+/* Botones */
+.boton-primario {
+  padding: 10px 20px;
+  border-radius: 6px;
+  border: none;
+  background: #16a34a;
+  color: white;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+  min-width: 80px;
+  transition: background-color 0.2s;
+}
+
+.boton-secundario {
+  margin-top: 0;
+  padding: 6px 10px;
+  border-radius: 4px;
+  border: 1px solid #d1d5db;
+  background: white;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.boton-icono {
+  padding: 6px 8px;
+  font-size: 14px;
+  border-radius: 999px;
+  border: 1px solid #d1d5db;
+  background: #f9fafb;
+  cursor: pointer;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Pestañas */
+.barra-pestanias {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid #e5e7eb;
+  background: #e5e7eb;
+  min-height: 32px;
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+
+.item-pestania {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 13px;
+  border-right: 1px solid #d1d5db;
+  position: relative;
+  white-space: nowrap;
+}
+
+.boton-cerrar-pestania {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0;
+  margin-left: 4px;
+}
+
+.badge {
+  background: #ef4444;
+  color: white;
+  border-radius: 999px;
+  font-size: 10px;
+  padding: 2px 6px;
+}
+
+.badge-pequeno {
+  background: #ef4444;
+  color: white;
+  border-radius: 999px;
+  font-size: 9px;
+  padding: 0 5px;
+  margin-left: 4px;
+}
+
+/* Auth */
+.tarjeta-auth {
+  width: 320px;
+  background: white;
+  padding: 24px;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.formulario {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.input {
+  padding: 8px;
+  border-radius: 4px;
+  border: 1px solid #d1d5db;
+}
+
+/* Modales */
+.fondo-modal {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.35);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 50;
+}
+
+.contenido-modal {
+  width: 380px;
+  max-height: 70vh;
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.25);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+}
+
+.lista-modal {
+  flex: 1;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  padding: 6px 10px;
+  overflow-y: auto;
+  max-height: 40vh;
+  margin-bottom: 10px;
+  background: #f9fafb;
+}
+
+.pie-modal {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 4px;
+}
+
+/* Botón Atrás (Mobile) */
+.boton-atras {
+  display: none; /* Oculto por defecto en desktop */
+  margin-right: 8px;
+  padding: 4px 8px;
+  background: transparent;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+/* =========================================
+   MEDIA QUERIES (Responsive)
+   ========================================= */
+
+/* =========================================
+   DESKTOP (más de 768px)
+   ========================================= */
+@media (min-width: 769px) {
+  /* Desktop: siempre mostrar ambos paneles lado a lado */
+  .app .barra-lateral {
+    display: flex !important;
+    flex-direction: column;
+  }
+
+  .app .area-chat {
+    display: flex !important;
+  }
+
+  /* Desktop: contenedor ya está configurado arriba para pantalla completa */
+
+  /* Ocultar botón atrás en desktop */
+  .boton-atras {
+    display: none !important;
+  }
+}
+
+/* Pantallas grandes (más de 1400px) */
+@media (min-width: 1401px) {
+  .contenedor {
+    padding: 0;
+    background: white;
+  }
+
+  .app {
+    width: 100%;
+    height: 100vh;
+  }
+
+  .barra-lateral {
+    width: 320px;
+    min-width: 280px;
+    max-width: 380px;
+  }
+}
+
+/* Tablets grandes (1025px - 1400px) */
+@media (min-width: 1025px) and (max-width: 1400px) {
+  .contenedor {
+    padding: 0;
+    background: white;
+  }
+
+  .app {
+    width: 100%;
+    height: 100vh;
+  }
+
+  .barra-lateral {
+    width: 280px;
+    min-width: 240px;
+    max-width: 320px;
+  }
+}
+
+/* Tablets (769px - 1024px) */
+@media (min-width: 769px) and (max-width: 1024px) {
+  .contenedor {
+    padding: 0;
+    background: white;
+  }
+
+  .app {
+    width: 100%;
+    height: 100vh;
+  }
+
+  .barra-lateral {
+    width: 260px;
+    min-width: 220px;
+    max-width: 280px;
+  }
+
+  .encabezado {
+    font-size: 13px;
+    padding: 0 12px;
+  }
+}
+
+/* =========================================
+   MÓVIL (hasta 768px)
+   ========================================= */
+@media (max-width: 768px) {
+  .contenedor {
+    padding: 0;
+    align-items: flex-start;
+  }
+
+  .app {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    height: 100vh;
+    max-height: 100vh;
+    min-height: 100vh;
+    border-radius: 0;
+    border: none;
+    box-shadow: none;
+  }
+
+  /* Móvil: mostrar panel lateral por defecto, ocultar área de chat */
+  .barra-lateral {
+    width: 100%;
+    min-width: 100%;
+    max-width: 100%;
+    border-right: none;
+    display: flex;
+    flex-direction: column;
+    max-height: calc(100vh - 56px);
+  }
+
+  .area-chat {
+    display: none; /* Oculto por defecto en móvil */
+    width: 100%;
+    max-height: calc(100vh - 56px);
+  }
+
+  /* Cuando hay un chat activo: ocultar panel lateral, mostrar área de chat */
+  .app.has-active-chat .barra-lateral {
+    display: none !important;
+  }
+
+  .app.has-active-chat .area-chat {
+    display: flex !important;
+  }
+
+  .boton-atras {
+    display: inline-block;
+  }
+
+  .encabezado {
+    height: auto;
+    min-height: 56px;
+    padding: 8px 12px;
+    font-size: 12px;
+    flex-wrap: wrap;
+  }
+
+  .encabezado > div {
+    width: 100%;
+    margin-bottom: 4px;
+  }
+
+  .encabezado > div:last-child {
+    margin-bottom: 0;
+  }
+
+  .mensaje {
+    max-width: 85%;
+    font-size: 13px;
+  }
+
+  .barra-entrada {
+    padding: 8px 12px;
+    gap: 8px;
+  }
+
+  .input-flex {
+    padding: 8px 10px;
+    font-size: 13px;
+  }
+
+  .boton-primario {
+    padding: 8px 16px;
+    font-size: 13px;
+    min-width: 70px;
+  }
+
+  .contenedor-lista {
+    max-height: 150px;
+  }
+}
+
+/* Móviles pequeños (hasta 480px) */
+@media (max-width: 480px) {
+  .barra-lateral {
+    padding: 12px;
+  }
+
+  .encabezado-chat {
+    padding: 8px 12px;
+  }
+
+  .mensajes {
+    padding: 8px;
+  }
+
+  .mensaje {
+    max-width: 90%;
+    padding: 6px;
+    font-size: 12px;
+  }
+
+  .tarjeta-auth {
+    width: 100%;
+    max-width: 320px;
+    padding: 20px;
+    margin: 0 16px;
+  }
+
+  .encabezado {
+    font-size: 11px;
+    padding: 8px 10px;
+  }
+
+  .encabezado > div {
+    font-size: 11px;
+  }
+
+  .boton-secundario {
+    padding: 4px 8px;
+    font-size: 11px;
+  }
+}
+
+/* Móviles muy pequeños (hasta 360px) */
+@media (max-width: 360px) {
+  .barra-lateral {
+    padding: 10px;
+  }
+
+  .encabezado {
+    font-size: 10px;
+    padding: 6px 8px;
+  }
+
+  .mensaje {
+    max-width: 95%;
+    font-size: 11px;
+    padding: 5px;
+  }
+
+  .input-flex {
+    padding: 6px 8px;
+    font-size: 12px;
+  }
+
+  .boton-primario {
+    padding: 6px 12px;
+    font-size: 12px;
+    min-width: 60px;
+  }
+}
