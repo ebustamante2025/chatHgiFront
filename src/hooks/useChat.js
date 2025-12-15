@@ -14,7 +14,8 @@ import {
 
 import { useRtc } from "./useRtc"; // 👈 nuevo hook WebRTC
 // URL del WebSocket
-const WS_URL = "ws://localhost:4000/ws";
+//const WS_URL = "ws://localhost:4000/ws";
+const WS_URL = "wss://backchat.hginet.com.co/ws";
 
 // Helper: genera una clave única por conversación
 export const getConversationKey = (type, id) => `${type}:${id}`;
