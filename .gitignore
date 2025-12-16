@@ -1,0 +1,12 @@
+# Node.js
+node_modules/
+dist/
+.env
+*.log
+
+# Windows
+Thumbs.db
+*.DS_Store
+
+# Docker
+*.env
