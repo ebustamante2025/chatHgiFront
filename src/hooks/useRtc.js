@@ -200,9 +200,14 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
   };
 
   // ---------------------------
-  // Acción: colgar
+  // Acción: colgar (notifyRemote=true por defecto, false si el remoto ya colgó)
   // ---------------------------
-  const endCall = useCallback(() => {
+  const endCall = useCallback((notifyRemote = true) => {
+    console.log("📞 endCall ejecutado, notifyRemote:", notifyRemote);
+    
+    // Guardar referencia al usuario remoto antes de limpiar
+    const remoteUserId = remoteUser?.id;
+    
     // cerrar pc si existe
     if (pcRef.current) {
       try {
@@ -228,9 +233,10 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     setIsVideoOff(false);
     iceCandidatesQueue.current = [];
 
-    // notificar al remoto que colgamos
-    if (remoteUser) {
-      sendSignal({ type: "RTC_CALL_END", toUserId: remoteUser.id });
+    // notificar al remoto que colgamos (solo si nosotros iniciamos el colgado)
+    if (notifyRemote && remoteUserId) {
+      console.log("📞 Notificando al usuario remoto:", remoteUserId);
+      sendSignal({ type: "RTC_CALL_END", toUserId: remoteUserId });
     }
 
     setInCall(false);
@@ -254,6 +260,8 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
   const acceptOffer = async (offerData) => {
     // offerData: { fromUserId, callMode, sdp }
     const { fromUserId, callMode: mode, sdp } = offerData;
+    console.log("📞 acceptOffer iniciado - fromUserId:", fromUserId, "mode:", mode);
+    
     setRemoteUser({ id: fromUserId });
     setCallMode(mode);
     setRemoteMicMuted(false); // Resetear estado
@@ -264,10 +272,17 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     // crear o recrear pc
     if (pcRef.current) { pcRef.current.close(); pcRef.current = null; dataChannelRef.current = null; }
     const pc = createPeerConnection();
+    console.log("📞 PeerConnection creado");
 
     // crear data channel estará en ondatachannel si el otro lo creó
     // primero setRemoteDescription (IMPORTANTE para no romper negociación)
-    await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+    try {
+      await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+      console.log("📞 RemoteDescription establecido");
+    } catch (err) {
+      console.error("❌ Error setRemoteDescription:", err);
+      return;
+    }
 
     // Procesar candidatos en cola ahora que tenemos remoteDescription
     await processIceQueue();
@@ -277,26 +292,36 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
       // FIX: Si me llaman para compartir pantalla ("screen"), yo solo envío audio (viewer)
       // Si es video o audio, respondo con lo mismo (video/audio)
       const myMode = mode === "screen" ? "audio" : mode;
+      console.log("📞 Obteniendo media local, modo:", myMode);
 
       const stream = await getMediaStream(myMode);
       localStreamRef.current = stream;
       attachLocalTracks(pc, stream);
+      console.log("📞 Media local obtenido y tracks añadidos");
     } catch (err) {
-      console.error("Error obteniendo media local:", err);
-      // Podríamos rechazar la llamada aquí si falla
+      console.error("❌ Error obteniendo media local:", err);
+      // Continuar sin media local si falla (el otro usuario verá/escuchará, pero no al revés)
     }
 
     // crear answer y enviarla
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
+    try {
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      console.log("📞 Answer creado y LocalDescription establecido");
 
-    sendSignal({
-      type: "RTC_CALL_ANSWER",
-      toUserId: fromUserId,
-      sdp: answer,
-    });
+      sendSignal({
+        type: "RTC_CALL_ANSWER",
+        toUserId: fromUserId,
+        sdp: answer,
+      });
+      console.log("📞 Answer enviado a usuario:", fromUserId);
+    } catch (err) {
+      console.error("❌ Error creando/enviando answer:", err);
+      return;
+    }
 
     setInCall(true);
+    console.log("📞 Llamada aceptada exitosamente, inCall = true");
     if (onCallStateChange) onCallStateChange({ inCall: true, role: "callee" });
   };
 
@@ -384,8 +409,9 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
         break;
 
       case "RTC_CALL_END":
-        // remoto colgó -> limpiar
-        endCall();
+        // remoto colgó -> limpiar sin notificar de vuelta (evitar loop)
+        console.log("📞 Remoto colgó, finalizando llamada local");
+        endCall(false); // false = no notificar al remoto (él ya sabe que colgó)
         break;
 
       default:
