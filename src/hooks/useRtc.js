@@ -1,6 +1,11 @@
 import { useRef, useState, useCallback, useEffect } from "react";
 
-const ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
+// Servidores STUN/TURN para WebRTC (múltiples opciones para mejor conectividad)
+const ICE_SERVERS = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun1.l.google.com:19302" },
+  { urls: "stun:stun2.l.google.com:19302" },
+];
 
 // Obtiene stream según modo. Para "screen" combinamos pantalla + micrófono (mejor compatibilidad)
 async function getMediaStream(mode) {
@@ -67,12 +72,23 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
 
     // ICE candidate local -> enviar al otro
     pc.onicecandidate = (ev) => {
-      if (ev.candidate && remoteUser) {
-        sendSignal({
-          type: "RTC_ICE_CANDIDATE",
-          toUserId: remoteUser.id,
-          candidate: ev.candidate,
-        });
+      if (ev.candidate) {
+        // Usar remoteUser del estado o del ref para evitar problemas de timing
+        const currentRemoteUser = remoteUser || (pcRef.current ? remoteUser : null);
+        if (currentRemoteUser) {
+          console.log("📞 ICE candidate generado, enviando a:", currentRemoteUser.id);
+          sendSignal({
+            type: "RTC_ICE_CANDIDATE",
+            toUserId: currentRemoteUser.id,
+            candidate: ev.candidate,
+          });
+        } else {
+          console.warn("⚠️ ICE candidate generado pero no hay remoteUser aún, encolando...");
+          // Encolar candidatos si no hay remoteUser aún
+          iceCandidatesQueue.current.push(ev.candidate);
+        }
+      } else if (ev.candidate === null) {
+        console.log("📞 ICE gathering completado");
       }
     };
 
@@ -80,6 +96,8 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     pc.ontrack = (event) => {
       const track = event.track;
       if (!track) return;
+      
+      console.log("📞 Track remoto recibido:", track.kind, track.id);
 
       setRemoteStream((prevStream) => {
         // Si ya tenemos un stream, le agregamos el track
@@ -103,9 +121,17 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
 
     // Estado de conexión
     pc.onconnectionstatechange = () => {
-      console.log("RTC Connection State:", pc.connectionState);
-      if (pc.connectionState === "disconnected" || pc.connectionState === "failed") {
-        // Opcional: manejar desconexión automática
+      const state = pc.connectionState;
+      console.log("📞 RTC Connection State cambiado:", state);
+      
+      if (state === "connected") {
+        console.log("✅ Conexión WebRTC establecida exitosamente!");
+      } else if (state === "disconnected") {
+        console.warn("⚠️ Conexión WebRTC desconectada");
+      } else if (state === "failed") {
+        console.error("❌ Conexión WebRTC falló");
+      } else if (state === "connecting") {
+        console.log("🔄 Conectando WebRTC...");
       }
     };
 
@@ -184,10 +210,13 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     }
 
     // crear offer y setLocalDescription
+    console.log("📞 Creando offer...");
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
+    console.log("📞 Offer creado y LocalDescription establecido");
 
     // enviar offer por WS (incluimos callMode)
+    console.log("📞 Enviando offer a usuario:", toUser.id);
     sendSignal({
       type: "RTC_CALL_OFFER",
       toUserId: toUser.id,
@@ -196,6 +225,7 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     });
 
     setInCall(true);
+    console.log("📞 Llamada iniciada, esperando answer...");
     if (onCallStateChange) onCallStateChange({ inCall: true, role: "caller" });
   };
 
@@ -329,32 +359,54 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
   // Manejar answer (caller recibe answer)
   // ---------------------------
   const handleAnswer = async (data) => {
-    const { sdp } = data;
+    console.log("📞 handleAnswer recibido - data:", data);
+    const { sdp, fromUserId } = data;
+    
     // Si ya existe la conexión (renegociación o respuesta inicial), usamos la existente
     // Si no, creamos una nueva (flujo inicial raro si no hay pcRef)
-    const pc = pcRef.current || createPeerConnection();
-
-    await pc.setRemoteDescription(new RTCSessionDescription(sdp));
-    // Procesar candidatos en cola
-    await processIceQueue();
+    const pc = pcRef.current;
+    
+    if (!pc) {
+      console.error("❌ No hay PeerConnection cuando se recibe answer");
+      return;
+    }
+    
+    console.log("📞 Estableciendo RemoteDescription con answer");
+    try {
+      await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+      console.log("📞 RemoteDescription establecido correctamente");
+      
+      // Procesar candidatos en cola
+      await processIceQueue();
+      console.log("📞 ICE candidates procesados");
+    } catch (err) {
+      console.error("❌ Error en handleAnswer:", err);
+    }
   };
 
   // ---------------------------
   // Manejar ICE candidate entrante
   // ---------------------------
   const handleIceCandidate = async (data) => {
-    const { candidate } = data;
-    const pc = pcRef.current || createPeerConnection();
+    const { candidate, fromUserId } = data;
+    console.log("📞 ICE candidate recibido de:", fromUserId);
+    
+    const pc = pcRef.current;
+    if (!pc) {
+      console.warn("⚠️ No hay PeerConnection, ignorando ICE candidate");
+      return;
+    }
 
     if (!pc.remoteDescription) {
       // Si no hay descripción remota, encolar
-      console.log("Encolando ICE candidate (remoteDescription no lista)");
+      console.log("📞 Encolando ICE candidate (remoteDescription no lista)");
       iceCandidatesQueue.current.push(candidate);
     } else {
       try {
         await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        console.log("📞 ICE candidate añadido correctamente");
       } catch (e) {
-        console.error("Error addIceCandidate:", e);
+        console.error("❌ Error addIceCandidate:", e);
       }
     }
   };
@@ -401,7 +453,12 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
         break;
 
       case "RTC_CALL_ANSWER":
-        await handleAnswer(data);
+        console.log("📞 RTC_CALL_ANSWER recibido en WebSocket handler - data completa:", data);
+        try {
+          await handleAnswer(data);
+        } catch (err) {
+          console.error("❌ Error procesando RTC_CALL_ANSWER:", err);
+        }
         break;
 
       case "RTC_ICE_CANDIDATE":
