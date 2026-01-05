@@ -1,7 +1,7 @@
 import { useRef, useState, useCallback, useEffect } from "react";
 
 const ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
-
+// cambios par a subir  eeee
 // Obtiene stream según modo. Para "screen" combinamos pantalla + micrófono (mejor compatibilidad)
 async function getMediaStream(mode) {
   if (mode === "screen") {
