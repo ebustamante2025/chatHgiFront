@@ -17,6 +17,77 @@ const ICE_SERVERS = [
   }
 ];
 
+// ============================================
+// SISTEMA DE MANEJO DE ERRORES CENTRALIZADO
+// ============================================
+const ErrorCodes = {
+  // Errores de inicialización
+  NO_USER_DESTINATION: "ERR_001",
+  PEER_CONNECTION_FAILED: "ERR_002",
+  DATA_CHANNEL_FAILED: "ERR_003",
+  
+  // Errores de media
+  MEDIA_ACCESS_DENIED: "ERR_101",
+  MEDIA_DEVICE_ERROR: "ERR_102",
+  MEDIA_STREAM_ERROR: "ERR_103",
+  
+  // Errores de señalización
+  OFFER_CREATION_FAILED: "ERR_201",
+  ANSWER_CREATION_FAILED: "ERR_202",
+  SET_LOCAL_DESCRIPTION_FAILED: "ERR_203",
+  SET_REMOTE_DESCRIPTION_FAILED: "ERR_204",
+  
+  // Errores de ICE
+  ICE_CANDIDATE_ERROR: "ERR_301",
+  ICE_CONNECTION_FAILED: "ERR_302",
+  ICE_GATHERING_FAILED: "ERR_303",
+  
+  // Errores de WebSocket
+  WEBSOCKET_NOT_OPEN: "ERR_401",
+  WEBSOCKET_SEND_FAILED: "ERR_402",
+  
+  // Errores de estado
+  NO_PEER_CONNECTION: "ERR_501",
+  INVALID_SDP: "ERR_502",
+  INVALID_CANDIDATE: "ERR_503",
+  
+  // Errores de conexión
+  CONNECTION_FAILED: "ERR_601",
+  CONNECTION_TIMEOUT: "ERR_602"
+};
+
+/**
+ * Función centralizada para loggear errores de manera consistente
+ */
+const logError = (code, message, details = {}, severity = "error") => {
+  const errorInfo = {
+    code,
+    message,
+    timestamp: new Date().toISOString(),
+    ...details
+  };
+  
+  const logMethod = severity === "error" ? console.error : console.warn;
+  const emoji = severity === "error" ? "❌" : "⚠️";
+  
+  logMethod(`${emoji} [${code}] ${message}`, errorInfo);
+  
+  return errorInfo;
+};
+
+/**
+ * Función para loggear errores críticos (que requieren acción inmediata)
+ */
+const logCriticalError = (code, message, details = {}) => {
+  return logError(code, message, details, "error");
+};
+
+/**
+ * Función para loggear advertencias (errores no críticos)
+ */
+const logWarning = (code, message, details = {}) => {
+  return logError(code, message, details, "warning");
+};
 // Obtiene stream según modo. Para "screen" combinamos pantalla + micrófono (mejor compatibilidad)
 async function getMediaStream(mode) {
   if (mode === "screen") {
@@ -72,11 +143,23 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
   // enviar señal por WS (con chequeo)
   const sendSignal = (payload) => {
     if (!wsRef?.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      console.warn("⚠️ No se puede enviar señal, WebSocket no está abierto");
+      logWarning(ErrorCodes.WEBSOCKET_NOT_OPEN, "No se puede enviar señal, WebSocket no está abierto", {
+        payloadType: payload?.type,
+        readyState: wsRef?.current?.readyState
+      });
       return;
     }
-    console.log("📤 Enviando señal WebRTC:", payload.type, "a usuario:", payload.toUserId);
-    wsRef.current.send(JSON.stringify(payload));
+    
+    try {
+      console.log("📤 Enviando señal WebRTC:", payload.type, "a usuario:", payload.toUserId);
+      wsRef.current.send(JSON.stringify(payload));
+    } catch (err) {
+      logCriticalError(ErrorCodes.WEBSOCKET_SEND_FAILED, "Error enviando señal por WebSocket", {
+        error: err.message,
+        payloadType: payload?.type,
+        toUserId: payload?.toUserId
+      });
+    }
   };
 
   // crea (o retorna) RTCPeerConnection
@@ -91,7 +174,12 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     
     // Log de errores del PeerConnection
     pc.onerror = (error) => {
-      console.error("❌ Error en RTCPeerConnection:", error);
+      logCriticalError(ErrorCodes.PEER_CONNECTION_FAILED, "Error en RTCPeerConnection", {
+        error: error?.message || String(error),
+        errorType: error?.type,
+        connectionState: pc.connectionState,
+        iceConnectionState: pc.iceConnectionState
+      });
     };
 
     // ICE candidate local -> enviar al otro
@@ -106,9 +194,10 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
             candidate: ev.candidate,
           });
         } else {
-          console.warn("⚠️ ICE candidate generado pero no hay remoteUserId aún. Se perderá este candidato.");
-          // No encolar candidatos generados localmente, solo esperar a que se establezca remoteUserId
-          // Los siguientes candidatos se enviarán correctamente
+          logWarning(ErrorCodes.ICE_CANDIDATE_ERROR, "ICE candidate generado pero no hay remoteUserId aún", {
+            candidate: ev.candidate?.candidate?.substring(0, 50) + "...",
+            note: "Se perderá este candidato, pero los siguientes se enviarán correctamente"
+          });
         }
       } else if (ev.candidate === null) {
         console.log("📞 ICE gathering completado");
@@ -159,7 +248,12 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
       } else if (state === "disconnected") {
         console.warn("⚠️ Conexión WebRTC desconectada");
       } else if (state === "failed") {
-        console.error("❌❌❌ Conexión WebRTC falló - Estado ICE:", iceState);
+        logCriticalError(ErrorCodes.CONNECTION_FAILED, "Conexión WebRTC falló", {
+          connectionState: state,
+          iceConnectionState: iceState,
+          iceGatheringState: iceGatheringState,
+          signalingState: pcRef.current?.signalingState
+        });
       } else if (state === "connecting") {
         console.log("🔄 Conectando WebRTC... Estado ICE:", iceState);
       } else if (state === "closed") {
@@ -175,7 +269,12 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
       if (iceState === "connected") {
         console.log("✅ ICE conectado");
       } else if (iceState === "failed") {
-        console.error("❌ ICE falló - Revisar STUN/TURN servers");
+        logCriticalError(ErrorCodes.ICE_CONNECTION_FAILED, "ICE falló - Revisar STUN/TURN servers", {
+          iceConnectionState: iceState,
+          connectionState: pcRef.current?.connectionState,
+          signalingState: pcRef.current?.signalingState,
+          suggestion: "Verificar configuración de STUN/TURN servers y firewall"
+        });
       } else if (iceState === "disconnected") {
         console.warn("⚠️ ICE desconectado");
       } else if (iceState === "checking") {
@@ -225,7 +324,11 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
         await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
         console.log("📞 ICE candidate añadido de la cola");
       } catch (e) {
-        console.error("❌ Error añadiendo ICE candidate de la cola:", e);
+        logCriticalError(ErrorCodes.ICE_CANDIDATE_ERROR, "Error añadiendo ICE candidate de la cola", {
+          error: e.message,
+          errorName: e.name,
+          candidate: candidate?.candidate?.substring(0, 50) + "..."
+        });
       }
     }
   };
@@ -240,7 +343,7 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     console.log("📞 Modo:", mode);
     
     if (!toUser) {
-      console.error("❌ No se proporcionó usuario destino");
+      logCriticalError(ErrorCodes.NO_USER_DESTINATION, "No se proporcionó usuario destino para iniciar llamada");
       return;
     }
     
@@ -278,13 +381,28 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
       attachLocalTracks(pc, stream);
       console.log("📞 Tracks locales añadidos al PeerConnection");
     } catch (err) {
-      console.error("❌ Error obteniendo media local:", err);
-      console.error("❌ Detalles del error:", {
-        name: err.name,
-        message: err.message,
-        stack: err.stack
+      const errorCode = err.name === "NotAllowedError" || err.name === "PermissionDeniedError"
+        ? ErrorCodes.MEDIA_ACCESS_DENIED
+        : err.name === "NotFoundError" || err.name === "DevicesNotFoundError"
+        ? ErrorCodes.MEDIA_DEVICE_ERROR
+        : ErrorCodes.MEDIA_STREAM_ERROR;
+      
+      logCriticalError(errorCode, "Error obteniendo media local", {
+        errorName: err.name,
+        errorMessage: err.message,
+        mode: mode,
+        userMessage: err.name === "NotAllowedError" 
+          ? "Permisos de cámara/micrófono denegados"
+          : err.name === "NotFoundError"
+          ? "Dispositivo de cámara/micrófono no encontrado"
+          : "Error al acceder a los dispositivos multimedia"
       });
-      alert("No se pudo acceder a la cámara/micrófono");
+      
+      alert(err.name === "NotAllowedError" 
+        ? "No se pudo acceder a la cámara/micrófono. Por favor, permite el acceso en la configuración del navegador."
+        : err.name === "NotFoundError"
+        ? "No se encontró cámara/micrófono. Verifica que los dispositivos estén conectados."
+        : "No se pudo acceder a la cámara/micrófono. Intenta nuevamente.");
       return;
     }
 
@@ -300,7 +418,13 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
       await pc.setLocalDescription(offer);
       console.log("📞 LocalDescription establecido, estado:", pc.signalingState);
     } catch (err) {
-      console.error("❌ Error creando offer:", err);
+      logCriticalError(ErrorCodes.OFFER_CREATION_FAILED, "Error creando offer", {
+        errorName: err.name,
+        errorMessage: err.message,
+        signalingState: pc.signalingState,
+        connectionState: pc.connectionState
+      });
+      endCall(false);
       return;
     }
 
@@ -345,7 +469,10 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
         console.log("📞 Cerrando PeerConnection, estado final:", pcRef.current.connectionState);
         pcRef.current.close();
       } catch (e) {
-        console.error("❌ Error cerrando pc:", e);
+        logWarning(ErrorCodes.PEER_CONNECTION_FAILED, "Error cerrando PeerConnection", {
+          error: e.message,
+          note: "No crítico, continuando con limpieza"
+        });
       }
       pcRef.current = null;
       console.log("✅ PeerConnection cerrado");
@@ -437,11 +564,12 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
       await pc.setRemoteDescription(new RTCSessionDescription(sdp));
       console.log("✅ RemoteDescription establecido, signalingState:", pc.signalingState);
     } catch (err) {
-      console.error("❌ Error setRemoteDescription:", err);
-      console.error("❌ Detalles:", {
-        name: err.name,
-        message: err.message,
-        sdpType: sdp?.type
+      logCriticalError(ErrorCodes.SET_REMOTE_DESCRIPTION_FAILED, "Error estableciendo RemoteDescription en acceptOffer", {
+        errorName: err.name,
+        errorMessage: err.message,
+        sdpType: sdp?.type,
+        signalingState: pc.signalingState,
+        fromUserId: fromUserId
       });
       return;
     }
@@ -463,10 +591,17 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
       attachLocalTracks(pc, stream);
       console.log("✅ Tracks locales añadidos al PeerConnection");
     } catch (err) {
-      console.error("❌ Error obteniendo media local:", err);
-      console.error("❌ Detalles:", {
-        name: err.name,
-        message: err.message
+      const errorCode = err.name === "NotAllowedError" || err.name === "PermissionDeniedError"
+        ? ErrorCodes.MEDIA_ACCESS_DENIED
+        : err.name === "NotFoundError" || err.name === "DevicesNotFoundError"
+        ? ErrorCodes.MEDIA_DEVICE_ERROR
+        : ErrorCodes.MEDIA_STREAM_ERROR;
+      
+      logWarning(errorCode, "Error obteniendo media local en acceptOffer", {
+        errorName: err.name,
+        errorMessage: err.message,
+        mode: myMode,
+        note: "Continuando sin media local - el otro usuario verá/escuchará, pero no al revés"
       });
       // Continuar sin media local si falla (el otro usuario verá/escuchará, pero no al revés)
     }
@@ -491,10 +626,11 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
       });
       console.log("✅ Answer enviado exitosamente");
     } catch (err) {
-      console.error("❌ Error creando/enviando answer:", err);
-      console.error("❌ Detalles:", {
-        name: err.name,
-        message: err.message,
+      logCriticalError(ErrorCodes.ANSWER_CREATION_FAILED, "Error creando/enviando answer", {
+        errorName: err.name,
+        errorMessage: err.message,
+        signalingState: pc.signalingState,
+        fromUserId: fromUserId,
         stack: err.stack
       });
       return;
@@ -520,8 +656,11 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     const pc = pcRef.current;
     
     if (!pc) {
-      console.error("❌❌❌ No hay PeerConnection cuando se recibe answer");
-      console.error("❌ Esto no debería pasar - el PC debería existir desde startCall");
+      logCriticalError(ErrorCodes.NO_PEER_CONNECTION, "No hay PeerConnection cuando se recibe answer", {
+        fromUserId: fromUserId,
+        note: "Esto no debería pasar - el PC debería existir desde startCall",
+        suggestion: "Verificar que startCall se haya ejecutado correctamente"
+      });
       return;
     }
     
@@ -538,12 +677,13 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
       await processIceQueue();
       console.log("✅ ICE candidates procesados");
     } catch (err) {
-      console.error("❌❌❌ Error en handleAnswer:", err);
-      console.error("❌ Detalles del error:", {
-        name: err.name,
-        message: err.message,
+      logCriticalError(ErrorCodes.SET_REMOTE_DESCRIPTION_FAILED, "Error en handleAnswer al establecer RemoteDescription", {
+        errorName: err.name,
+        errorMessage: err.message,
         signalingState: pc.signalingState,
-        sdpType: sdp?.type
+        sdpType: sdp?.type,
+        fromUserId: fromUserId,
+        iceConnectionState: pc.iceConnectionState
       });
     }
   };
@@ -562,7 +702,10 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     
     const pc = pcRef.current;
     if (!pc) {
-      console.warn("⚠️ No hay PeerConnection, ignorando ICE candidate");
+      logWarning(ErrorCodes.NO_PEER_CONNECTION, "No hay PeerConnection, ignorando ICE candidate", {
+        fromUserId: fromUserId,
+        candidate: candidate?.candidate?.substring(0, 50) + "..."
+      });
       return;
     }
 
@@ -580,11 +723,15 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
         console.log("✅ ICE candidate añadido correctamente");
         console.log("📞 ICE Connection State después de añadir:", pc.iceConnectionState);
       } catch (e) {
-        console.error("❌ Error addIceCandidate:", e);
-        console.error("❌ Detalles:", {
-          name: e.name,
-          message: e.message,
-          candidate: candidate
+        logCriticalError(ErrorCodes.ICE_CANDIDATE_ERROR, "Error añadiendo ICE candidate", {
+          errorName: e.name,
+          errorMessage: e.message,
+          fromUserId: fromUserId,
+          candidate: candidate?.candidate?.substring(0, 50) + "...",
+          sdpMLineIndex: candidate?.sdpMLineIndex,
+          sdpMid: candidate?.sdpMid,
+          signalingState: pc.signalingState,
+          remoteDescription: pc.remoteDescription ? "OK" : "NO"
         });
       }
     }
@@ -651,8 +798,12 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
         try {
           await handleAnswer(data);
         } catch (err) {
-          console.error("❌❌❌ Error procesando RTC_CALL_ANSWER:", err);
-          console.error("❌ Stack:", err.stack);
+          logCriticalError(ErrorCodes.SET_REMOTE_DESCRIPTION_FAILED, "Error procesando RTC_CALL_ANSWER", {
+            errorName: err.name,
+            errorMessage: err.message,
+            fromUserId: data.fromUserId,
+            stack: err.stack
+          });
         }
         break;
 
@@ -661,7 +812,11 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
         try {
           await handleIceCandidate(data);
         } catch (err) {
-          console.error("❌ Error procesando RTC_ICE_CANDIDATE:", err);
+          logCriticalError(ErrorCodes.ICE_CANDIDATE_ERROR, "Error procesando RTC_ICE_CANDIDATE", {
+            errorName: err.name,
+            errorMessage: err.message,
+            fromUserId: data.fromUserId
+          });
         }
         break;
 
