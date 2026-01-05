@@ -1,10 +1,20 @@
 import { useRef, useState, useCallback, useEffect } from "react";
 
-// Servidores STUN/TURN para WebRTC (múltiples opciones para mejor conectividad)
+// Servidores STUN/TURN para WebRTC
+// STUN: Descubre IP pública (gratis, Google)
+// TURN: Relay cuando P2P directo falla (tu servidor)
 const ICE_SERVERS = [
+  // STUN servers (descubrimiento de IP pública)
   { urls: "stun:stun.l.google.com:19302" },
-  { urls: "stun:stun1.l.google.com:19302" },
-  { urls: "stun:stun2.l.google.com:19302" },
+  // TURN server (relay cuando P2P directo no funciona)
+  {
+    urls: [
+      "turn:turn.hginet.com.co:3478?transport=udp",
+      "turn:turn.hginet.com.co:3478?transport=tcp"
+    ],
+    username: "chatHgi",
+    credential: "Laverdad2026*"
+  }
 ];
 
 // Obtiene stream según modo. Para "screen" combinamos pantalla + micrófono (mejor compatibilidad)
@@ -47,6 +57,7 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
   const remoteStreamRef = useRef(null);  // MediaStream remoto (MediaStream object)
   const incomingOfferRef = useRef(null); // almacenar offer entrante mientras el user decide
   const iceCandidatesQueue = useRef([]); // Cola de candidatos ICE
+  const remoteUserIdRef = useRef(null);  // Ref para mantener el ID del usuario remoto
 
   const [inCall, setInCall] = useState(false);
   const [callMode, setCallMode] = useState(null); // "video"|"audio"|"screen"
@@ -60,32 +71,44 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
 
   // enviar señal por WS (con chequeo)
   const sendSignal = (payload) => {
-    if (!wsRef?.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    if (!wsRef?.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      console.warn("⚠️ No se puede enviar señal, WebSocket no está abierto");
+      return;
+    }
+    console.log("📤 Enviando señal WebRTC:", payload.type, "a usuario:", payload.toUserId);
     wsRef.current.send(JSON.stringify(payload));
   };
 
   // crea (o retorna) RTCPeerConnection
   const createPeerConnection = () => {
-    if (pcRef.current) return pcRef.current;
+    if (pcRef.current) {
+      console.log("📞 PeerConnection ya existe, reutilizando");
+      return pcRef.current;
+    }
 
+    console.log("📞 Creando nuevo RTCPeerConnection con ICE servers:", ICE_SERVERS);
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    
+    // Log de errores del PeerConnection
+    pc.onerror = (error) => {
+      console.error("❌ Error en RTCPeerConnection:", error);
+    };
 
     // ICE candidate local -> enviar al otro
     pc.onicecandidate = (ev) => {
       if (ev.candidate) {
-        // Usar remoteUser del estado o del ref para evitar problemas de timing
-        const currentRemoteUser = remoteUser || (pcRef.current ? remoteUser : null);
-        if (currentRemoteUser) {
-          console.log("📞 ICE candidate generado, enviando a:", currentRemoteUser.id);
+        const targetUserId = remoteUserIdRef.current;
+        if (targetUserId) {
+          console.log("📞 ICE candidate generado localmente, enviando a:", targetUserId);
           sendSignal({
             type: "RTC_ICE_CANDIDATE",
-            toUserId: currentRemoteUser.id,
+            toUserId: targetUserId,
             candidate: ev.candidate,
           });
         } else {
-          console.warn("⚠️ ICE candidate generado pero no hay remoteUser aún, encolando...");
-          // Encolar candidatos si no hay remoteUser aún
-          iceCandidatesQueue.current.push(ev.candidate);
+          console.warn("⚠️ ICE candidate generado pero no hay remoteUserId aún. Se perderá este candidato.");
+          // No encolar candidatos generados localmente, solo esperar a que se establezca remoteUserId
+          // Los siguientes candidatos se enviarán correctamente
         }
       } else if (ev.candidate === null) {
         console.log("📞 ICE gathering completado");
@@ -122,17 +145,47 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     // Estado de conexión
     pc.onconnectionstatechange = () => {
       const state = pc.connectionState;
-      console.log("📞 RTC Connection State cambiado:", state);
+      const iceState = pc.iceConnectionState;
+      const iceGatheringState = pc.iceGatheringState;
+      
+      console.log("📞 RTC Connection State:", {
+        connectionState: state,
+        iceConnectionState: iceState,
+        iceGatheringState: iceGatheringState
+      });
       
       if (state === "connected") {
-        console.log("✅ Conexión WebRTC establecida exitosamente!");
+        console.log("✅✅✅ Conexión WebRTC establecida exitosamente!");
       } else if (state === "disconnected") {
         console.warn("⚠️ Conexión WebRTC desconectada");
       } else if (state === "failed") {
-        console.error("❌ Conexión WebRTC falló");
+        console.error("❌❌❌ Conexión WebRTC falló - Estado ICE:", iceState);
       } else if (state === "connecting") {
-        console.log("🔄 Conectando WebRTC...");
+        console.log("🔄 Conectando WebRTC... Estado ICE:", iceState);
+      } else if (state === "closed") {
+        console.log("🔒 Conexión WebRTC cerrada");
       }
+    };
+
+    // Estado ICE (más detallado)
+    pc.oniceconnectionstatechange = () => {
+      const iceState = pc.iceConnectionState;
+      console.log("📞 ICE Connection State:", iceState);
+      
+      if (iceState === "connected") {
+        console.log("✅ ICE conectado");
+      } else if (iceState === "failed") {
+        console.error("❌ ICE falló - Revisar STUN/TURN servers");
+      } else if (iceState === "disconnected") {
+        console.warn("⚠️ ICE desconectado");
+      } else if (iceState === "checking") {
+        console.log("🔍 ICE verificando conexión...");
+      }
+    };
+
+    // Estado de gathering ICE
+    pc.onicegatheringstatechange = () => {
+      console.log("📞 ICE Gathering State:", pc.iceGatheringState);
     };
 
     pcRef.current = pc;
@@ -162,27 +215,38 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     stream.getTracks().forEach((track) => pc.addTrack(track, stream));
   };
 
-  // Procesar cola de candidatos ICE
+  // Procesar cola de candidatos ICE (para añadir candidatos recibidos)
   const processIceQueue = async () => {
     if (!pcRef.current || !pcRef.current.remoteDescription) return;
+    console.log("📞 Procesando cola de ICE candidates, cantidad:", iceCandidatesQueue.current.length);
     while (iceCandidatesQueue.current.length > 0) {
       const candidate = iceCandidatesQueue.current.shift();
       try {
         await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
-        console.log("ICE candidate añadido de la cola");
+        console.log("📞 ICE candidate añadido de la cola");
       } catch (e) {
-        console.error("Error añadiendo ICE candidate de la cola:", e);
+        console.error("❌ Error añadiendo ICE candidate de la cola:", e);
       }
     }
   };
+
 
   // ---------------------------
   // Acción: iniciar llamada (emisor)
   // ---------------------------
   const startCall = async (toUser, mode = "video") => {
-    if (!toUser) return;
+    console.log("🚀 ========== INICIANDO LLAMADA ==========");
+    console.log("📞 Usuario destino:", toUser.username, "ID:", toUser.id);
+    console.log("📞 Modo:", mode);
+    
+    if (!toUser) {
+      console.error("❌ No se proporcionó usuario destino");
+      return;
+    }
+    
     // si ya había una pc, cerrarla (recreate para evitar problemas entre modos)
     if (pcRef.current) {
+      console.log("📞 Cerrando PeerConnection anterior...");
       pcRef.current.close();
       pcRef.current = null;
       dataChannelRef.current = null;
@@ -190,30 +254,55 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     iceCandidatesQueue.current = []; // Limpiar cola
 
     setRemoteUser(toUser);
+    remoteUserIdRef.current = toUser.id; // Guardar en ref para acceso en callbacks
     setCallMode(mode);
+    console.log("📞 RemoteUserId establecido:", toUser.id);
 
     // crear pc y data channel
+    console.log("📞 Creando PeerConnection...");
     const pc = createPeerConnection();
+    console.log("📞 PeerConnection creado, ID:", pc ? "OK" : "ERROR");
+    
+    console.log("📞 Creando DataChannel...");
     const dc = pc.createDataChannel("data");
     dataChannelRef.current = dc;
     setupDataChannel(dc);
+    console.log("📞 DataChannel creado");
 
     // obtener media local (puede pedir permisos)
+    console.log("📞 Solicitando permisos de media (modo:", mode, ")...");
     try {
       const stream = await getMediaStream(mode);
+      console.log("📞 Media local obtenido, tracks:", stream.getTracks().map(t => `${t.kind}:${t.id}`));
       localStreamRef.current = stream;
       attachLocalTracks(pc, stream);
+      console.log("📞 Tracks locales añadidos al PeerConnection");
     } catch (err) {
-      console.error("Error obteniendo media local:", err);
+      console.error("❌ Error obteniendo media local:", err);
+      console.error("❌ Detalles del error:", {
+        name: err.name,
+        message: err.message,
+        stack: err.stack
+      });
       alert("No se pudo acceder a la cámara/micrófono");
       return;
     }
 
     // crear offer y setLocalDescription
     console.log("📞 Creando offer...");
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    console.log("📞 Offer creado y LocalDescription establecido");
+    try {
+      const offer = await pc.createOffer();
+      console.log("📞 Offer creado:", {
+        type: offer.type,
+        sdp: offer.sdp ? offer.sdp.substring(0, 100) + "..." : "sin SDP"
+      });
+      
+      await pc.setLocalDescription(offer);
+      console.log("📞 LocalDescription establecido, estado:", pc.signalingState);
+    } catch (err) {
+      console.error("❌ Error creando offer:", err);
+      return;
+    }
 
     // enviar offer por WS (incluimos callMode)
     console.log("📞 Enviando offer a usuario:", toUser.id);
@@ -225,7 +314,8 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     });
 
     setInCall(true);
-    console.log("📞 Llamada iniciada, esperando answer...");
+    console.log("✅ Llamada iniciada, esperando answer...");
+    console.log("📞 Estado actual - inCall:", true, "remoteUserId:", remoteUserIdRef.current);
     if (onCallStateChange) onCallStateChange({ inCall: true, role: "caller" });
   };
 
@@ -233,47 +323,74 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
   // Acción: colgar (notifyRemote=true por defecto, false si el remoto ya colgó)
   // ---------------------------
   const endCall = useCallback((notifyRemote = true) => {
+    console.log("🔴 ========== FINALIZANDO LLAMADA ==========");
     console.log("📞 endCall ejecutado, notifyRemote:", notifyRemote);
+    console.log("📞 Estado antes de limpiar - inCall:", inCall, "remoteUserId:", remoteUser?.id);
     
     // Guardar referencia al usuario remoto antes de limpiar
     const remoteUserId = remoteUser?.id;
     
     // cerrar pc si existe
     if (pcRef.current) {
+      console.log("📞 Cerrando PeerConnection...");
       try {
-        pcRef.current.getSenders().forEach(s => s.track && s.track.stop());
+        const senders = pcRef.current.getSenders();
+        console.log("📞 Deteniendo", senders.length, "tracks locales");
+        senders.forEach(s => {
+          if (s.track) {
+            console.log("📞 Deteniendo track:", s.track.kind, s.track.id);
+            s.track.stop();
+          }
+        });
+        console.log("📞 Cerrando PeerConnection, estado final:", pcRef.current.connectionState);
         pcRef.current.close();
       } catch (e) {
-        console.warn("Error cerrando pc:", e);
+        console.error("❌ Error cerrando pc:", e);
       }
       pcRef.current = null;
+      console.log("✅ PeerConnection cerrado");
+    } else {
+      console.log("📞 No hay PeerConnection para cerrar");
     }
 
     // detener local stream
     if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach(t => t.stop());
+      console.log("📞 Deteniendo local stream...");
+      const tracks = localStreamRef.current.getTracks();
+      console.log("📞 Tracks a detener:", tracks.length);
+      tracks.forEach(t => {
+        console.log("📞 Deteniendo track:", t.kind, t.id, "estado:", t.readyState);
+        t.stop();
+      });
       localStreamRef.current = null;
+      console.log("✅ Local stream detenido");
     }
 
     // limpiar remote stream
+    console.log("📞 Limpiando remote stream...");
     remoteStreamRef.current = null;
     setRemoteStream(null);
     setRemoteMicMuted(false);
     setRemoteVideoOff(false);
     setIsVideoOff(false);
     iceCandidatesQueue.current = [];
+    console.log("✅ Estados limpiados");
 
     // notificar al remoto que colgamos (solo si nosotros iniciamos el colgado)
     if (notifyRemote && remoteUserId) {
-      console.log("📞 Notificando al usuario remoto:", remoteUserId);
+      console.log("📞 Notificando al usuario remoto que colgamos:", remoteUserId);
       sendSignal({ type: "RTC_CALL_END", toUserId: remoteUserId });
+    } else {
+      console.log("📞 No se notifica al remoto (notifyRemote:", notifyRemote, "remoteUserId:", remoteUserId, ")");
     }
 
     setInCall(false);
     setCallMode(null);
     setRemoteUser(null);
+    remoteUserIdRef.current = null; // Limpiar ref
+    console.log("✅✅✅ Llamada finalizada completamente");
     if (onCallStateChange) onCallStateChange({ inCall: false });
-  }, [remoteUser, onCallStateChange]); // Dependencias para useCallback
+  }, [remoteUser, onCallStateChange, inCall]); // Añadido inCall a dependencias
 
   // Cleanup al desmontar
   useEffect(() => {
@@ -288,33 +405,49 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
   // Manejar offer entrante (callee) — llamada aceptada (respuesta)
   // ---------------------------
   const acceptOffer = async (offerData) => {
+    console.log("🚀 ========== ACEPTANDO LLAMADA ==========");
     // offerData: { fromUserId, callMode, sdp }
     const { fromUserId, callMode: mode, sdp } = offerData;
     console.log("📞 acceptOffer iniciado - fromUserId:", fromUserId, "mode:", mode);
+    console.log("📞 Offer SDP recibido:", sdp ? "OK" : "ERROR", sdp?.type);
     
     setRemoteUser({ id: fromUserId });
+    remoteUserIdRef.current = fromUserId; // Guardar en ref para acceso en callbacks
     setCallMode(mode);
     setRemoteMicMuted(false); // Resetear estado
     setRemoteVideoOff(false);
     setIsVideoOff(false);
     iceCandidatesQueue.current = []; // Limpiar cola
+    console.log("📞 Estados inicializados, remoteUserId:", fromUserId);
 
     // crear o recrear pc
-    if (pcRef.current) { pcRef.current.close(); pcRef.current = null; dataChannelRef.current = null; }
+    if (pcRef.current) {
+      console.log("📞 Cerrando PeerConnection anterior...");
+      pcRef.current.close();
+      pcRef.current = null;
+      dataChannelRef.current = null;
+    }
     const pc = createPeerConnection();
     console.log("📞 PeerConnection creado");
 
     // crear data channel estará en ondatachannel si el otro lo creó
     // primero setRemoteDescription (IMPORTANTE para no romper negociación)
+    console.log("📞 Estableciendo RemoteDescription...");
     try {
       await pc.setRemoteDescription(new RTCSessionDescription(sdp));
-      console.log("📞 RemoteDescription establecido");
+      console.log("✅ RemoteDescription establecido, signalingState:", pc.signalingState);
     } catch (err) {
       console.error("❌ Error setRemoteDescription:", err);
+      console.error("❌ Detalles:", {
+        name: err.name,
+        message: err.message,
+        sdpType: sdp?.type
+      });
       return;
     }
 
     // Procesar candidatos en cola ahora que tenemos remoteDescription
+    console.log("📞 Procesando candidatos ICE en cola...");
     await processIceQueue();
 
     // obtener media local (según modo) y añadir tracks
@@ -325,33 +458,51 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
       console.log("📞 Obteniendo media local, modo:", myMode);
 
       const stream = await getMediaStream(myMode);
+      console.log("📞 Media local obtenido, tracks:", stream.getTracks().map(t => `${t.kind}:${t.id}`));
       localStreamRef.current = stream;
       attachLocalTracks(pc, stream);
-      console.log("📞 Media local obtenido y tracks añadidos");
+      console.log("✅ Tracks locales añadidos al PeerConnection");
     } catch (err) {
       console.error("❌ Error obteniendo media local:", err);
+      console.error("❌ Detalles:", {
+        name: err.name,
+        message: err.message
+      });
       // Continuar sin media local si falla (el otro usuario verá/escuchará, pero no al revés)
     }
 
     // crear answer y enviarla
+    console.log("📞 Creando answer...");
     try {
       const answer = await pc.createAnswer();
+      console.log("📞 Answer creado:", {
+        type: answer.type,
+        sdp: answer.sdp ? answer.sdp.substring(0, 100) + "..." : "sin SDP"
+      });
+      
       await pc.setLocalDescription(answer);
-      console.log("📞 Answer creado y LocalDescription establecido");
+      console.log("✅ LocalDescription establecido, signalingState:", pc.signalingState);
 
+      console.log("📞 Enviando answer a usuario:", fromUserId);
       sendSignal({
         type: "RTC_CALL_ANSWER",
         toUserId: fromUserId,
         sdp: answer,
       });
-      console.log("📞 Answer enviado a usuario:", fromUserId);
+      console.log("✅ Answer enviado exitosamente");
     } catch (err) {
       console.error("❌ Error creando/enviando answer:", err);
+      console.error("❌ Detalles:", {
+        name: err.name,
+        message: err.message,
+        stack: err.stack
+      });
       return;
     }
 
     setInCall(true);
-    console.log("📞 Llamada aceptada exitosamente, inCall = true");
+    console.log("✅✅✅ Llamada aceptada exitosamente, inCall = true");
+    console.log("📞 Estado actual - inCall:", true, "remoteUserId:", remoteUserIdRef.current);
     if (onCallStateChange) onCallStateChange({ inCall: true, role: "callee" });
   };
 
@@ -359,28 +510,41 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
   // Manejar answer (caller recibe answer)
   // ---------------------------
   const handleAnswer = async (data) => {
-    console.log("📞 handleAnswer recibido - data:", data);
+    console.log("🚀 ========== RECIBIENDO ANSWER ==========");
+    console.log("📞 handleAnswer recibido - data completa:", data);
     const { sdp, fromUserId } = data;
+    console.log("📞 Answer de usuario:", fromUserId, "SDP type:", sdp?.type);
     
     // Si ya existe la conexión (renegociación o respuesta inicial), usamos la existente
     // Si no, creamos una nueva (flujo inicial raro si no hay pcRef)
     const pc = pcRef.current;
     
     if (!pc) {
-      console.error("❌ No hay PeerConnection cuando se recibe answer");
+      console.error("❌❌❌ No hay PeerConnection cuando se recibe answer");
+      console.error("❌ Esto no debería pasar - el PC debería existir desde startCall");
       return;
     }
     
-    console.log("📞 Estableciendo RemoteDescription con answer");
+    console.log("📞 PeerConnection encontrado, signalingState actual:", pc.signalingState);
+    console.log("📞 Estableciendo RemoteDescription con answer...");
     try {
       await pc.setRemoteDescription(new RTCSessionDescription(sdp));
-      console.log("📞 RemoteDescription establecido correctamente");
+      console.log("✅ RemoteDescription establecido correctamente");
+      console.log("📞 Nuevo signalingState:", pc.signalingState);
+      console.log("📞 ICE Connection State:", pc.iceConnectionState);
       
       // Procesar candidatos en cola
+      console.log("📞 Procesando candidatos ICE en cola...");
       await processIceQueue();
-      console.log("📞 ICE candidates procesados");
+      console.log("✅ ICE candidates procesados");
     } catch (err) {
-      console.error("❌ Error en handleAnswer:", err);
+      console.error("❌❌❌ Error en handleAnswer:", err);
+      console.error("❌ Detalles del error:", {
+        name: err.name,
+        message: err.message,
+        signalingState: pc.signalingState,
+        sdpType: sdp?.type
+      });
     }
   };
 
@@ -390,6 +554,11 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
   const handleIceCandidate = async (data) => {
     const { candidate, fromUserId } = data;
     console.log("📞 ICE candidate recibido de:", fromUserId);
+    console.log("📞 Candidate details:", {
+      candidate: candidate.candidate?.substring(0, 50) + "...",
+      sdpMLineIndex: candidate.sdpMLineIndex,
+      sdpMid: candidate.sdpMid
+    });
     
     const pc = pcRef.current;
     if (!pc) {
@@ -397,16 +566,26 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
       return;
     }
 
+    console.log("📞 Estado actual PC - remoteDescription:", pc.remoteDescription ? "OK" : "NO", 
+                "signalingState:", pc.signalingState);
+
     if (!pc.remoteDescription) {
       // Si no hay descripción remota, encolar
       console.log("📞 Encolando ICE candidate (remoteDescription no lista)");
       iceCandidatesQueue.current.push(candidate);
+      console.log("📞 Candidatos en cola:", iceCandidatesQueue.current.length);
     } else {
       try {
         await pc.addIceCandidate(new RTCIceCandidate(candidate));
-        console.log("📞 ICE candidate añadido correctamente");
+        console.log("✅ ICE candidate añadido correctamente");
+        console.log("📞 ICE Connection State después de añadir:", pc.iceConnectionState);
       } catch (e) {
         console.error("❌ Error addIceCandidate:", e);
+        console.error("❌ Detalles:", {
+          name: e.name,
+          message: e.message,
+          candidate: candidate
+        });
       }
     }
   };
@@ -416,16 +595,27 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
   // ---------------------------
   const handleWsMessage = useCallback(async (data) => {
     // data ya parseado por quien llama
+    console.log("📥 Mensaje WebRTC recibido:", data.type, "de usuario:", data.fromUserId);
+    
     switch (data.type) {
       case "RTC_CALL_OFFER":
+        console.log("📥 ========== RTC_CALL_OFFER RECIBIDO ==========");
+        console.log("📥 Detalles:", {
+          fromUserId: data.fromUserId,
+          callMode: data.callMode,
+          sdpType: data.sdp?.type,
+          inCall: inCall,
+          currentRemoteUserId: remoteUser?.id
+        });
+        
         // RENEGOCIACIÓN: Si ya estamos en llamada con este usuario, aceptamos directo
         // Usamos == para evitar problemas de tipos (string vs number)
         if (inCall && remoteUser && remoteUser.id == data.fromUserId) {
-          console.log("Renegociación detectada (cambio de modo), aceptando automáticamente...");
+          console.log("🔄 Renegociación detectada (cambio de modo), aceptando automáticamente...");
           await acceptOffer(data);
           return;
         } else {
-          console.log("Oferta recibida pero NO es renegociación automática:", {
+          console.log("📥 Oferta recibida pero NO es renegociación automática:", {
             inCall,
             remoteUserId: remoteUser?.id,
             offerFromId: data.fromUserId
@@ -435,11 +625,13 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
         // Guardar oferta y notificar UI para mostrar modal
         incomingOfferRef.current = data;
         if (onIncomingCall) {
+          console.log("📥 Mostrando modal de llamada entrante...");
           onIncomingCall({
             fromUserId: data.fromUserId,
             callMode: data.callMode,
             accept: () => acceptOffer(data),
             reject: () => {
+              console.log("📥 Llamada rechazada por usuario");
               // enviar rechazo (fin de llamada)
               sendSignal({ type: "RTC_CALL_END", toUserId: data.fromUserId });
               incomingOfferRef.current = null;
@@ -447,31 +639,41 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
             raw: data,
           });
         } else {
+          console.log("📥 No hay callback onIncomingCall, aceptando automáticamente...");
           // Si no hay callback definido, aceptamos automáticamente (fallback)
           await acceptOffer(data);
         }
         break;
 
       case "RTC_CALL_ANSWER":
-        console.log("📞 RTC_CALL_ANSWER recibido en WebSocket handler - data completa:", data);
+        console.log("📥 ========== RTC_CALL_ANSWER RECIBIDO ==========");
+        console.log("📥 Data completa:", data);
         try {
           await handleAnswer(data);
         } catch (err) {
-          console.error("❌ Error procesando RTC_CALL_ANSWER:", err);
+          console.error("❌❌❌ Error procesando RTC_CALL_ANSWER:", err);
+          console.error("❌ Stack:", err.stack);
         }
         break;
 
       case "RTC_ICE_CANDIDATE":
-        await handleIceCandidate(data);
+        console.log("📥 ========== RTC_ICE_CANDIDATE RECIBIDO ==========");
+        try {
+          await handleIceCandidate(data);
+        } catch (err) {
+          console.error("❌ Error procesando RTC_ICE_CANDIDATE:", err);
+        }
         break;
 
       case "RTC_CALL_END":
+        console.log("📥 ========== RTC_CALL_END RECIBIDO ==========");
+        console.log("📥 Remoto colgó, finalizando llamada local");
         // remoto colgó -> limpiar sin notificar de vuelta (evitar loop)
-        console.log("📞 Remoto colgó, finalizando llamada local");
         endCall(false); // false = no notificar al remoto (él ya sabe que colgó)
         break;
 
       default:
+        console.log("📥 Mensaje WebRTC desconocido:", data.type);
         // ignorar
         break;
     }

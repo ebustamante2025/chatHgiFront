@@ -619,9 +619,9 @@ body {
   .encabezado > div:last-child {
     margin-bottom: 0;
   }
-
+  
   .mensaje {
-    max-width: 85%;
+      max-width: 85%;
     font-size: 13px;
   }
 
