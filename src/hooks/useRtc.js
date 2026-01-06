@@ -525,8 +525,9 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
 
     // crear offer y setLocalDescription
     console.log("📞 Creando offer...");
+    let offer;
     try {
-      const offer = await pc.createOffer();
+      offer = await pc.createOffer();
       console.log("📞 Offer creado:", {
         type: offer.type,
         sdp: offer.sdp ? offer.sdp.substring(0, 100) + "..." : "sin SDP"
@@ -540,6 +541,15 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
         errorMessage: err.message,
         signalingState: pc.signalingState,
         connectionState: pc.connectionState
+      });
+      endCall(false);
+      return;
+    }
+
+    // Verificar que offer se creó correctamente antes de enviarlo
+    if (!offer) {
+      logCriticalError(ErrorCodes.OFFER_CREATION_FAILED, "Offer no se creó correctamente", {
+        signalingState: pc.signalingState
       });
       endCall(false);
       return;
