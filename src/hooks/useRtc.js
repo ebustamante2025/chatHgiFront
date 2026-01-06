@@ -186,7 +186,13 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     });
     console.log("================================================");
     
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    // Configuración de PeerConnection con timeout más largo para ICE
+    const pc = new RTCPeerConnection({ 
+      iceServers: ICE_SERVERS,
+      iceCandidatePoolSize: 10, // Pre-generar más candidatos
+      bundlePolicy: "max-bundle", // Optimizar para mejor rendimiento
+      rtcpMuxPolicy: "require" // Requerir RTCP muxing
+    });
     
     // Log de errores del PeerConnection
     pc.onerror = (error) => {
@@ -315,12 +321,55 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
       } else if (state === "disconnected") {
         console.warn("⚠️ Conexión WebRTC desconectada");
       } else if (state === "failed") {
-        logCriticalError(ErrorCodes.CONNECTION_FAILED, "Conexión WebRTC falló", {
+        // Obtener información detallada del fallo
+        const pc = pcRef.current;
+        let diagnosticInfo = {
           connectionState: state,
           iceConnectionState: iceState,
           iceGatheringState: iceGatheringState,
-          signalingState: pcRef.current?.signalingState
-        });
+          signalingState: pc?.signalingState,
+          localDescription: pc?.localDescription ? "OK" : "NO",
+          remoteDescription: pc?.remoteDescription ? "OK" : "NO"
+        };
+        
+        // Intentar obtener estadísticas para diagnóstico
+        if (pc) {
+          pc.getStats().then(stats => {
+            let candidateInfo = {
+              localCandidates: 0,
+              remoteCandidates: 0,
+              relayCandidates: 0,
+              hostCandidates: 0,
+              srflxCandidates: 0
+            };
+            
+            stats.forEach(report => {
+              if (report.type === "local-candidate") {
+                candidateInfo.localCandidates++;
+                if (report.candidateType === "relay") candidateInfo.relayCandidates++;
+                if (report.candidateType === "host") candidateInfo.hostCandidates++;
+                if (report.candidateType === "srflx") candidateInfo.srflxCandidates++;
+              }
+              if (report.type === "remote-candidate") {
+                candidateInfo.remoteCandidates++;
+              }
+            });
+            
+            console.error("🔍 DIAGNÓSTICO DE FALLO:", {
+              ...diagnosticInfo,
+              candidatos: candidateInfo,
+              problema: candidateInfo.relayCandidates === 0 
+                ? "No se generaron candidatos TURN - Servidor TURN no accesible"
+                : candidateInfo.remoteCandidates === 0
+                ? "No se recibieron candidatos del remoto - Problema en WebSocket o intercambio"
+                : "Candidatos generados pero conexión falló - Problema de firewall/NAT"
+            });
+          }).catch(err => {
+            console.warn("⚠️ No se pudieron obtener estadísticas para diagnóstico:", err);
+          });
+        }
+        
+        logCriticalError(ErrorCodes.CONNECTION_FAILED, "Conexión WebRTC falló", diagnosticInfo);
       } else if (state === "connecting") {
         console.log("🔄 Conectando WebRTC... Estado ICE:", iceState);
       } else if (state === "closed") {
@@ -391,7 +440,79 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
           suggestion: "Verificar configuración de STUN/TURN servers y firewall"
         });
       } else if (iceState === "disconnected") {
-        console.warn("⚠️ ICE desconectado");
+        console.warn("⚠️ ICE desconectado - Intentando diagnóstico...");
+        
+        // Diagnóstico cuando ICE se desconecta
+        if (pcRef.current) {
+          pcRef.current.getStats().then(stats => {
+            let diagnostic = {
+              candidatePairs: [],
+              localCandidates: [],
+              remoteCandidates: [],
+              failedPairs: []
+            };
+            
+            stats.forEach(report => {
+              if (report.type === "candidate-pair") {
+                diagnostic.candidatePairs.push({
+                  state: report.state,
+                  priority: report.priority,
+                  nominated: report.nominated,
+                  bytesSent: report.bytesSent || 0,
+                  bytesReceived: report.bytesReceived || 0
+                });
+                
+                if (report.state === "failed") {
+                  diagnostic.failedPairs.push({
+                    localCandidateId: report.localCandidateId,
+                    remoteCandidateId: report.remoteCandidateId,
+                    priority: report.priority
+                  });
+                }
+              }
+              
+              if (report.type === "local-candidate") {
+                diagnostic.localCandidates.push({
+                  type: report.candidateType,
+                  ip: report.ip || report.address,
+                  port: report.port,
+                  protocol: report.protocol
+                });
+              }
+              
+              if (report.type === "remote-candidate") {
+                diagnostic.remoteCandidates.push({
+                  type: report.candidateType,
+                  ip: report.ip || report.address,
+                  port: report.port,
+                  protocol: report.protocol
+                });
+              }
+            });
+            
+            console.error("🔍 DIAGNÓSTICO ICE DESCONECTADO:", {
+              totalCandidatePairs: diagnostic.candidatePairs.length,
+              failedPairs: diagnostic.failedPairs.length,
+              localCandidates: diagnostic.localCandidates.length,
+              remoteCandidates: diagnostic.remoteCandidates.length,
+              localRelayCandidates: diagnostic.localCandidates.filter(c => c.type === "relay").length,
+              remoteRelayCandidates: diagnostic.remoteCandidates.filter(c => c.type === "relay").length,
+              candidatePairs: diagnostic.candidatePairs,
+              failedPairs: diagnostic.failedPairs,
+              localCandidates: diagnostic.localCandidates,
+              remoteCandidates: diagnostic.remoteCandidates,
+              problema: diagnostic.failedPairs.length > 0
+                ? "Pares de candidatos fallaron - Posible problema de conectividad con TURN"
+                : diagnostic.localCandidates.filter(c => c.type === "relay").length === 0
+                ? "No se generaron candidatos TURN locales"
+                : diagnostic.remoteCandidates.filter(c => c.type === "relay").length === 0
+                ? "No se recibieron candidatos TURN remotos"
+                : "Candidatos TURN presentes pero conexión falló - Verificar servidor TURN"
+            });
+          }).catch(err => {
+            console.warn("⚠️ Error obteniendo estadísticas:", err);
+          });
+        }
       } else if (iceState === "checking") {
         console.log("🔍 ICE verificando conexión...");
       } else if (iceState === "completed") {
@@ -732,8 +853,12 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     }
 
     // Procesar candidatos en cola ahora que tenemos remoteDescription
-    console.log("📞 Procesando candidatos ICE en cola...");
+    // IMPORTANTE: Los candidatos que llegaron ANTES de crear el PeerConnection
+    // ya están en la cola y se procesarán aquí
+    console.log("📞 Procesando candidatos ICE en cola (pueden incluir candidatos recibidos antes de crear PC)...");
+    console.log("📞 Candidatos en cola antes de procesar:", iceCandidatesQueue.current.length);
     await processIceQueue();
+    console.log("📞 Candidatos procesados, cola restante:", iceCandidatesQueue.current.length);
 
     // obtener media local (según modo) y añadir tracks
     try {
@@ -829,10 +954,13 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
       console.log("📞 Nuevo signalingState:", pc.signalingState);
       console.log("📞 ICE Connection State:", pc.iceConnectionState);
       
-      // Procesar candidatos en cola
-      console.log("📞 Procesando candidatos ICE en cola...");
+      // Procesar candidatos en cola ahora que tenemos remoteDescription
+      // IMPORTANTE: Los candidatos que llegaron ANTES de recibir el answer
+      // ya están en la cola y se procesarán aquí
+      console.log("📞 Procesando candidatos ICE en cola (pueden incluir candidatos recibidos antes del answer)...");
+      console.log("📞 Candidatos en cola antes de procesar:", iceCandidatesQueue.current.length);
       await processIceQueue();
-      console.log("✅ ICE candidates procesados");
+      console.log("✅ ICE candidates procesados, cola restante:", iceCandidatesQueue.current.length);
     } catch (err) {
       logCriticalError(ErrorCodes.SET_REMOTE_DESCRIPTION_FAILED, "Error en handleAnswer al establecer RemoteDescription", {
         errorName: err.name,
@@ -892,12 +1020,30 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     
     const pc = pcRef.current;
     if (!pc) {
-      logWarning(ErrorCodes.NO_PEER_CONNECTION, "No hay PeerConnection, ignorando ICE candidate", {
-        fromUserId: fromUserId,
-        candidateType: candidateType,
-        ip: ip,
-        isTurn: isTurn
-      });
+      // Si no hay PeerConnection, puede ser porque:
+      // 1. La llamada ya terminó (normal - candidatos tardíos)
+      // 2. Aún no se ha creado el PeerConnection (en acceptOffer) - ENCOLAR
+      // 3. Hay una oferta entrante pendiente - ENCOLAR
+      // 4. Error - debería haber PeerConnection pero no existe
+      
+      if (!inCall && !incomingOfferRef.current) {
+        // Llamada ya terminó y no hay oferta pendiente - candidatos tardíos, ignorar silenciosamente
+        console.log("📞 Candidato ICE recibido después de que la llamada terminó, ignorando (normal)");
+        return;
+      } else {
+        // Estamos esperando crear PeerConnection (acceptOffer) o hay oferta pendiente
+        // ENCOLAR el candidato para procesarlo después
+        console.log("📞 PeerConnection aún no creado, encolando candidato ICE para procesar después");
+        console.log("📞 Candidato será procesado cuando se cree PeerConnection y se establezca remoteDescription");
+        iceCandidatesQueue.current.push(candidate);
+        console.log("📞 Candidatos en cola:", iceCandidatesQueue.current.length);
+        return;
+      }
+    }
+    
+    // Verificar que el PeerConnection no esté cerrado
+    if (pc.connectionState === "closed") {
+      console.log("📞 Candidato ICE recibido pero PeerConnection está cerrado, ignorando");
       return;
     }
 
