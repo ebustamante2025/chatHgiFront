@@ -129,6 +129,8 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
   const incomingOfferRef = useRef(null); // almacenar offer entrante mientras el user decide
   const iceCandidatesQueue = useRef([]); // Cola de candidatos ICE
   const remoteUserIdRef = useRef(null);  // Ref para mantener el ID del usuario remoto
+  const receivedCandidatesCountRef = useRef(0); // Contador de candidatos recibidos
+  const sentCandidatesCountRef = useRef(0); // Contador de candidatos enviados
 
   const [inCall, setInCall] = useState(false);
   const [callMode, setCallMode] = useState(null); // "video"|"audio"|"screen"
@@ -257,12 +259,25 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
         
         const targetUserId = remoteUserIdRef.current;
         if (targetUserId) {
-          console.log("📤 Enviando candidato a usuario:", targetUserId);
+          sentCandidatesCountRef.current++;
+          console.log(`📤 Enviando candidato #${sentCandidatesCountRef.current} a usuario:`, targetUserId);
+          
+          // Validar candidato antes de enviar
+          if (!candidate || !candidate.candidate) {
+            logWarning(ErrorCodes.ICE_CANDIDATE_ERROR, "Candidato inválido generado, no se enviará", {
+              candidateType: candidateType,
+              ip: ip,
+              port: port
+            });
+            return;
+          }
+          
           sendSignal({
             type: "RTC_ICE_CANDIDATE",
             toUserId: targetUserId,
             candidate: candidate,
           });
+          console.log(`✅ Candidato #${sentCandidatesCountRef.current} enviado exitosamente`);
         } else {
           logWarning(ErrorCodes.ICE_CANDIDATE_ERROR, "ICE candidate generado pero no hay remoteUserId aún", {
             candidateType: candidateType,
@@ -358,11 +373,17 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
             console.error("🔍 DIAGNÓSTICO DE FALLO:", {
               ...diagnosticInfo,
               candidatos: candidateInfo,
+              estadisticas: {
+                candidatosEnviados: sentCandidatesCountRef.current,
+                candidatosRecibidos: receivedCandidatesCountRef.current,
+                candidatosEnCola: iceCandidatesQueue.current.length,
+                candidatosRemotosEnPC: candidateInfo.remoteCandidates
+              },
               problema: candidateInfo.relayCandidates === 0 
                 ? "No se generaron candidatos TURN - Servidor TURN no accesible"
                 : candidateInfo.remoteCandidates === 0
-                ? "No se recibieron candidatos del remoto - Problema en WebSocket o intercambio"
-                : "Candidatos generados pero conexión falló - Problema de firewall/NAT"
+                ? `❌ CRÍTICO: No se recibieron candidatos del remoto - Enviados: ${sentCandidatesCountRef.current}, Recibidos: ${receivedCandidatesCountRef.current} - Verificar WebSocket y que el remoto esté enviando candidatos`
+                : "Candidatos generados pero conexión falló - Problema de firewall/NAT o servidor TURN no puede hacer relay"
             });
           }).catch(err => {
             console.warn("⚠️ No se pudieron obtener estadísticas para diagnóstico:", err);
@@ -554,21 +575,47 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
 
   // Procesar cola de candidatos ICE (para añadir candidatos recibidos)
   const processIceQueue = async () => {
-    if (!pcRef.current || !pcRef.current.remoteDescription) return;
-    console.log("📞 Procesando cola de ICE candidates, cantidad:", iceCandidatesQueue.current.length);
+    if (!pcRef.current) {
+      console.warn("⚠️ No hay PeerConnection para procesar cola de candidatos");
+      return;
+    }
+    
+    if (!pcRef.current.remoteDescription) {
+      console.warn("⚠️ No hay remoteDescription, no se pueden procesar candidatos aún");
+      return;
+    }
+    
+    const queueLength = iceCandidatesQueue.current.length;
+    console.log("📞 Procesando cola de ICE candidates, cantidad:", queueLength);
+    
+    if (queueLength === 0) {
+      console.log("📞 Cola vacía, no hay candidatos para procesar");
+      return;
+    }
+    
+    let processed = 0;
+    let failed = 0;
+    
     while (iceCandidatesQueue.current.length > 0) {
       const candidate = iceCandidatesQueue.current.shift();
       try {
         await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
-        console.log("📞 ICE candidate añadido de la cola");
+        processed++;
+        console.log(`✅ ICE candidate ${processed}/${queueLength} añadido de la cola`);
       } catch (e) {
+        failed++;
         logCriticalError(ErrorCodes.ICE_CANDIDATE_ERROR, "Error añadiendo ICE candidate de la cola", {
           error: e.message,
           errorName: e.name,
-          candidate: candidate?.candidate?.substring(0, 50) + "..."
+          candidate: candidate?.candidate?.substring(0, 50) + "...",
+          processed: processed,
+          failed: failed,
+          remaining: iceCandidatesQueue.current.length
         });
       }
     }
+    
+    console.log(`📞 Cola procesada: ${processed} exitosos, ${failed} fallidos, ${iceCandidatesQueue.current.length} restantes`);
   };
 
 
@@ -779,6 +826,8 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     setRemoteVideoOff(false);
     setIsVideoOff(false);
     iceCandidatesQueue.current = [];
+    receivedCandidatesCountRef.current = 0; // Resetear contador
+    sentCandidatesCountRef.current = 0; // Resetear contador
     console.log("✅ Estados limpiados");
 
     // notificar al remoto que colgamos (solo si nosotros iniciamos el colgado)
@@ -1007,12 +1056,15 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
       port = portMatch[1];
     }
     
+    receivedCandidatesCountRef.current++;
     console.log("🌐 ========== ICE CANDIDATO RECIBIDO ==========");
+    console.log(`📥 Candidato remoto #${receivedCandidatesCountRef.current} recibido`);
     console.log("👤 De usuario:", fromUserId);
     console.log("📡 Tipo:", candidateType.toUpperCase(), isTurn ? "🔀 (TURN RELAY)" : "");
     console.log("📍 IP remota:", ip);
     console.log("🔌 Puerto remoto:", port);
     console.log("📋 Candidato:", candidateString.substring(0, 150) + "...");
+    console.log("📊 Estadísticas - Enviados:", sentCandidatesCountRef.current, "Recibidos:", receivedCandidatesCountRef.current);
     
     if (isTurn) {
       console.log("✅ El remoto está usando TURN SERVER");
@@ -1057,9 +1109,34 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
       console.log("📞 Candidatos en cola:", iceCandidatesQueue.current.length);
     } else {
       try {
+        // Validar candidato antes de añadirlo
+        if (!candidate || !candidate.candidate) {
+          logWarning(ErrorCodes.ICE_CANDIDATE_ERROR, "Candidato inválido recibido, ignorando", {
+            fromUserId: fromUserId,
+            candidateType: candidateType,
+            receivedCount: receivedCandidatesCountRef.current
+          });
+          return;
+        }
+        
         await pc.addIceCandidate(new RTCIceCandidate(candidate));
-        console.log("✅ ICE candidate añadido correctamente");
+        console.log(`✅ ICE candidate #${receivedCandidatesCountRef.current} añadido correctamente al PeerConnection`);
         console.log("📞 ICE Connection State después de añadir:", pc.iceConnectionState);
+        
+        // Verificar cuántos candidatos remotos tenemos ahora
+        if (pc.getStats) {
+          pc.getStats().then(stats => {
+            let remoteCount = 0;
+            stats.forEach(report => {
+              if (report.type === "remote-candidate") remoteCount++;
+            });
+            console.log(`📊 Candidatos remotos en PeerConnection: ${remoteCount} (Recibidos: ${receivedCandidatesCountRef.current})`);
+            
+            if (remoteCount === 0 && receivedCandidatesCountRef.current > 0) {
+              console.warn("⚠️ Candidatos recibidos pero no se añadieron al PeerConnection - Verificar formato de candidatos");
+            }
+          }).catch(() => {});
+        }
       } catch (e) {
         logCriticalError(ErrorCodes.ICE_CANDIDATE_ERROR, "Error añadiendo ICE candidate", {
           errorName: e.name,
@@ -1149,13 +1226,31 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
 
       case "RTC_ICE_CANDIDATE":
         console.log("📥 ========== RTC_ICE_CANDIDATE RECIBIDO ==========");
+        console.log("📥 Verificando datos del candidato:", {
+          fromUserId: data.fromUserId,
+          hasCandidate: !!data.candidate,
+          candidateType: data.candidate?.candidate?.substring(0, 50) || "N/A",
+          inCall: inCall,
+          hasPeerConnection: !!pcRef.current
+        });
+        
+        if (!data.candidate) {
+          logWarning(ErrorCodes.ICE_CANDIDATE_ERROR, "RTC_ICE_CANDIDATE recibido sin candidato", {
+            fromUserId: data.fromUserId,
+            data: data
+          });
+          break;
+        }
+        
         try {
           await handleIceCandidate(data);
+          console.log("✅ RTC_ICE_CANDIDATE procesado exitosamente");
         } catch (err) {
           logCriticalError(ErrorCodes.ICE_CANDIDATE_ERROR, "Error procesando RTC_ICE_CANDIDATE", {
             errorName: err.name,
             errorMessage: err.message,
-            fromUserId: data.fromUserId
+            fromUserId: data.fromUserId,
+            candidate: data.candidate?.candidate?.substring(0, 100) || "N/A"
           });
         }
         break;
