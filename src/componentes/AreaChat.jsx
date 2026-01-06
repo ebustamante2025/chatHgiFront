@@ -655,7 +655,7 @@ export function AreaChat({
               {/* Colgar */}
               <button
                 type="button"
-                onClick={rtcEndCall}
+                onClick={() => rtcEndCall && rtcEndCall(true)}
                 title="Colgar llamada"
                 style={{
                   padding: "8px 16px",

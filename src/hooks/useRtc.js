@@ -170,6 +170,22 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     }
 
     console.log("📞 Creando nuevo RTCPeerConnection con ICE servers:", ICE_SERVERS);
+    console.log("🌐 ========== CONFIGURACIÓN DE SERVIDORES ICE ==========");
+    ICE_SERVERS.forEach((server, index) => {
+      if (Array.isArray(server.urls)) {
+        console.log(`   ${index + 1}. TURN Server (Relay):`);
+        server.urls.forEach(url => {
+          console.log(`      - ${url}`);
+        });
+        console.log(`      - Username: ${server.username || "N/A"}`);
+        console.log(`      - Credential: ${server.credential ? "***" : "N/A"}`);
+      } else {
+        console.log(`   ${index + 1}. STUN Server (Descubrimiento):`);
+        console.log(`      - ${server.urls}`);
+      }
+    });
+    console.log("================================================");
+    
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     
     // Log de errores del PeerConnection
@@ -185,22 +201,73 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     // ICE candidate local -> enviar al otro
     pc.onicecandidate = (ev) => {
       if (ev.candidate) {
+        const candidate = ev.candidate;
+        const candidateString = candidate.candidate || "";
+        
+        // Analizar tipo de candidato ICE
+        let candidateType = "unknown";
+        let ip = "N/A";
+        let port = "N/A";
+        let isTurn = false;
+        
+        // Extraer información del candidato
+        if (candidateString.includes("typ host")) {
+          candidateType = "host"; // IP local
+        } else if (candidateString.includes("typ srflx")) {
+          candidateType = "srflx"; // STUN (IP pública descubierta)
+        } else if (candidateString.includes("typ relay")) {
+          candidateType = "relay"; // TURN (relay)
+          isTurn = true;
+        } else if (candidateString.includes("typ prflx")) {
+          candidateType = "prflx"; // Peer reflexive
+        }
+        
+        // Extraer IP y puerto del candidato
+        const ipMatch = candidateString.match(/(\d+\.\d+\.\d+\.\d+)/);
+        if (ipMatch) {
+          ip = ipMatch[1];
+        }
+        const portMatch = candidateString.match(/port (\d+)/);
+        if (portMatch) {
+          port = portMatch[1];
+        }
+        
+        // Log detallado del candidato
+        console.log("🌐 ========== ICE CANDIDATO GENERADO ==========");
+        console.log("📡 Tipo:", candidateType.toUpperCase(), isTurn ? "🔀 (TURN RELAY)" : "");
+        console.log("📍 IP:", ip);
+        console.log("🔌 Puerto:", port);
+        console.log("📋 Candidato completo:", candidateString.substring(0, 150) + "...");
+        console.log("📊 Protocolo:", candidate.protocol || "N/A");
+        console.log("🔢 Priority:", candidate.priority || "N/A");
+        
+        if (isTurn) {
+          console.log("✅✅✅ USANDO TURN SERVER - Conexión por relay");
+        } else if (candidateType === "srflx") {
+          console.log("🔍 Usando STUN - IP pública descubierta (intentando P2P directo)");
+        } else if (candidateType === "host") {
+          console.log("🏠 Candidato local (host) - IP privada");
+        }
+        
         const targetUserId = remoteUserIdRef.current;
         if (targetUserId) {
-          console.log("📞 ICE candidate generado localmente, enviando a:", targetUserId);
+          console.log("📤 Enviando candidato a usuario:", targetUserId);
           sendSignal({
             type: "RTC_ICE_CANDIDATE",
             toUserId: targetUserId,
-            candidate: ev.candidate,
+            candidate: candidate,
           });
         } else {
           logWarning(ErrorCodes.ICE_CANDIDATE_ERROR, "ICE candidate generado pero no hay remoteUserId aún", {
-            candidate: ev.candidate?.candidate?.substring(0, 50) + "...",
+            candidateType: candidateType,
+            ip: ip,
+            port: port,
+            isTurn: isTurn,
             note: "Se perderá este candidato, pero los siguientes se enviarán correctamente"
           });
         }
       } else if (ev.candidate === null) {
-        console.log("📞 ICE gathering completado");
+        console.log("✅ ICE gathering completado - Todos los candidatos generados");
       }
     };
 
@@ -267,7 +334,55 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
       console.log("📞 ICE Connection State:", iceState);
       
       if (iceState === "connected") {
-        console.log("✅ ICE conectado");
+        console.log("✅✅✅ ICE conectado exitosamente");
+        
+        // Obtener información de la conexión establecida
+        pc.getStats().then(stats => {
+          stats.forEach(report => {
+            if (report.type === "candidate-pair" && report.state === "succeeded") {
+              const localCandidateId = report.localCandidateId;
+              const remoteCandidateId = report.remoteCandidateId;
+              
+              // Buscar información de los candidatos locales y remotos
+              stats.forEach(candidateReport => {
+                if (candidateReport.type === "local-candidate" && candidateReport.id === localCandidateId) {
+                  console.log("🌐 ========== CONEXIÓN ESTABLECIDA ==========");
+                  console.log("📍 Candidato Local:");
+                  console.log("   - Tipo:", candidateReport.candidateType || "N/A");
+                  console.log("   - IP:", candidateReport.ip || candidateReport.address || "N/A");
+                  console.log("   - Puerto:", candidateReport.port || "N/A");
+                  console.log("   - Protocolo:", candidateReport.protocol || "N/A");
+                  
+                  if (candidateReport.candidateType === "relay") {
+                    console.log("   ✅✅✅ USANDO TURN RELAY - Conexión por servidor TURN");
+                    console.log("   🔀 IP del TURN:", candidateReport.ip || candidateReport.address);
+                  } else if (candidateReport.candidateType === "srflx") {
+                    console.log("   🔍 Usando STUN - Conexión P2P directa con IP pública");
+                  } else if (candidateReport.candidateType === "host") {
+                    console.log("   🏠 Conexión local (misma red)");
+                  }
+                }
+                
+                if (candidateReport.type === "remote-candidate" && candidateReport.id === remoteCandidateId) {
+                  console.log("📍 Candidato Remoto:");
+                  console.log("   - Tipo:", candidateReport.candidateType || "N/A");
+                  console.log("   - IP:", candidateReport.ip || candidateReport.address || "N/A");
+                  console.log("   - Puerto:", candidateReport.port || "N/A");
+                  console.log("   - Protocolo:", candidateReport.protocol || "N/A");
+                }
+              });
+              
+              // Información del par de candidatos
+              console.log("📊 Estadísticas de conexión:");
+              console.log("   - Bytes enviados:", report.bytesSent || 0);
+              console.log("   - Bytes recibidos:", report.bytesReceived || 0);
+              console.log("   - Packets enviados:", report.packetsSent || 0);
+              console.log("   - Packets recibidos:", report.packetsReceived || 0);
+            }
+          });
+        }).catch(err => {
+          console.warn("⚠️ No se pudieron obtener estadísticas de conexión:", err);
+        });
       } else if (iceState === "failed") {
         logCriticalError(ErrorCodes.ICE_CONNECTION_FAILED, "ICE falló - Revisar STUN/TURN servers", {
           iceConnectionState: iceState,
@@ -279,6 +394,8 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
         console.warn("⚠️ ICE desconectado");
       } else if (iceState === "checking") {
         console.log("🔍 ICE verificando conexión...");
+      } else if (iceState === "completed") {
+        console.log("✅ ICE completado - Negociación finalizada");
       }
     };
 
@@ -447,6 +564,36 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
   // Acción: colgar (notifyRemote=true por defecto, false si el remoto ya colgó)
   // ---------------------------
   const endCall = useCallback((notifyRemote = true) => {
+    // Validar que notifyRemote sea un booleano (evitar que se pase un evento de React)
+    // Si se pasa un evento (objeto con propiedades como _reactName, type: 'click', etc.), lo convertimos a true
+    if (typeof notifyRemote !== "boolean") {
+      const isReactEvent = notifyRemote && 
+        (notifyRemote._reactName || notifyRemote.type === 'click' || notifyRemote.nativeEvent);
+      
+      if (isReactEvent) {
+        logWarning(ErrorCodes.NO_PEER_CONNECTION, "endCall recibió evento de React en lugar de booleano, corrigiendo a true", {
+          receivedType: typeof notifyRemote,
+          isReactEvent: true,
+          fixingTo: true,
+          note: "Esto ocurre cuando onClick pasa directamente la función sin envolver en arrow function"
+        });
+        notifyRemote = true;
+      } else {
+        logWarning(ErrorCodes.NO_PEER_CONNECTION, "endCall recibió argumento inválido, usando valor por defecto", {
+          receivedType: typeof notifyRemote,
+          receivedValue: notifyRemote,
+          fixingTo: true
+        });
+        notifyRemote = true;
+      }
+    }
+    
+    // Protección contra llamadas duplicadas cuando no hay llamada activa
+    if (!inCall && !pcRef.current) {
+      console.log("📞 endCall llamado pero no hay llamada activa, ignorando");
+      return;
+    }
+    
     console.log("🔴 ========== FINALIZANDO LLAMADA ==========");
     console.log("📞 endCall ejecutado, notifyRemote:", notifyRemote);
     console.log("📞 Estado antes de limpiar - inCall:", inCall, "remoteUserId:", remoteUser?.id);
@@ -693,18 +840,53 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
   // ---------------------------
   const handleIceCandidate = async (data) => {
     const { candidate, fromUserId } = data;
-    console.log("📞 ICE candidate recibido de:", fromUserId);
-    console.log("📞 Candidate details:", {
-      candidate: candidate.candidate?.substring(0, 50) + "...",
-      sdpMLineIndex: candidate.sdpMLineIndex,
-      sdpMid: candidate.sdpMid
-    });
+    const candidateString = candidate.candidate || "";
+    
+    // Analizar tipo de candidato recibido
+    let candidateType = "unknown";
+    let ip = "N/A";
+    let port = "N/A";
+    let isTurn = false;
+    
+    if (candidateString.includes("typ host")) {
+      candidateType = "host";
+    } else if (candidateString.includes("typ srflx")) {
+      candidateType = "srflx";
+    } else if (candidateString.includes("typ relay")) {
+      candidateType = "relay";
+      isTurn = true;
+    } else if (candidateString.includes("typ prflx")) {
+      candidateType = "prflx";
+    }
+    
+    // Extraer IP y puerto
+    const ipMatch = candidateString.match(/(\d+\.\d+\.\d+\.\d+)/);
+    if (ipMatch) {
+      ip = ipMatch[1];
+    }
+    const portMatch = candidateString.match(/port (\d+)/);
+    if (portMatch) {
+      port = portMatch[1];
+    }
+    
+    console.log("🌐 ========== ICE CANDIDATO RECIBIDO ==========");
+    console.log("👤 De usuario:", fromUserId);
+    console.log("📡 Tipo:", candidateType.toUpperCase(), isTurn ? "🔀 (TURN RELAY)" : "");
+    console.log("📍 IP remota:", ip);
+    console.log("🔌 Puerto remoto:", port);
+    console.log("📋 Candidato:", candidateString.substring(0, 150) + "...");
+    
+    if (isTurn) {
+      console.log("✅ El remoto está usando TURN SERVER");
+    }
     
     const pc = pcRef.current;
     if (!pc) {
       logWarning(ErrorCodes.NO_PEER_CONNECTION, "No hay PeerConnection, ignorando ICE candidate", {
         fromUserId: fromUserId,
-        candidate: candidate?.candidate?.substring(0, 50) + "..."
+        candidateType: candidateType,
+        ip: ip,
+        isTurn: isTurn
       });
       return;
     }
@@ -727,7 +909,9 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
           errorName: e.name,
           errorMessage: e.message,
           fromUserId: fromUserId,
-          candidate: candidate?.candidate?.substring(0, 50) + "...",
+          candidateType: candidateType,
+          ip: ip,
+          isTurn: isTurn,
           sdpMLineIndex: candidate?.sdpMLineIndex,
           sdpMid: candidate?.sdpMid,
           signalingState: pc.signalingState,
