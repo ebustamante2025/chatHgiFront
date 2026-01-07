@@ -154,12 +154,29 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     
     try {
       console.log("📤 Enviando señal WebRTC:", payload.type, "a usuario:", payload.toUserId);
-      wsRef.current.send(JSON.stringify(payload));
+      
+      // Log detallado para candidatos ICE
+      if (payload.type === "RTC_ICE_CANDIDATE") {
+        const candidateStr = payload.candidate?.candidate || "";
+        console.log("📤 Detalles del candidato a enviar:", {
+          hasCandidate: !!payload.candidate,
+          candidatePreview: candidateStr.substring(0, 80),
+          toUserId: payload.toUserId,
+          wsReadyState: wsRef.current?.readyState
+        });
+      }
+      
+      const messageStr = JSON.stringify(payload);
+      console.log("📤 Mensaje WebSocket (tamaño):", messageStr.length, "bytes");
+      wsRef.current.send(messageStr);
+      console.log("✅ Mensaje enviado exitosamente por WebSocket");
     } catch (err) {
       logCriticalError(ErrorCodes.WEBSOCKET_SEND_FAILED, "Error enviando señal por WebSocket", {
         error: err.message,
         payloadType: payload?.type,
-        toUserId: payload?.toUserId
+        toUserId: payload?.toUserId,
+        wsReadyState: wsRef.current?.readyState,
+        errorStack: err.stack
       });
     }
   };
@@ -377,12 +394,15 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
                 candidatosEnviados: sentCandidatesCountRef.current,
                 candidatosRecibidos: receivedCandidatesCountRef.current,
                 candidatosEnCola: iceCandidatesQueue.current.length,
-                candidatosRemotosEnPC: candidateInfo.remoteCandidates
+                candidatosRemotosEnPC: candidateInfo.remoteCandidates,
+                nota: "getStats() puede no reflejar candidatos añadidos recientemente. Verificar logs de signaling para confirmar recepción."
               },
               problema: candidateInfo.relayCandidates === 0 
                 ? "No se generaron candidatos TURN - Servidor TURN no accesible"
-                : candidateInfo.remoteCandidates === 0
-                ? `❌ CRÍTICO: No se recibieron candidatos del remoto - Enviados: ${sentCandidatesCountRef.current}, Recibidos: ${receivedCandidatesCountRef.current} - Verificar WebSocket y que el remoto esté enviando candidatos`
+                : candidateInfo.remoteCandidates === 0 && receivedCandidatesCountRef.current === 0
+                ? `❌ CRÍTICO: No se recibieron candidatos del remoto por signaling - Verificar WebSocket y que el remoto esté enviando candidatos`
+                : candidateInfo.remoteCandidates === 0 && receivedCandidatesCountRef.current > 0
+                ? `⚠️ Candidatos recibidos por signaling (${receivedCandidatesCountRef.current}) pero no añadidos al PC - Verificar formato de candidatos o timing`
                 : "Candidatos generados pero conexión falló - Problema de firewall/NAT o servidor TURN no puede hacer relay"
             });
           }).catch(err => {
@@ -858,7 +878,7 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
   // ---------------------------
   // Manejar offer entrante (callee) — llamada aceptada (respuesta)
   // ---------------------------
-  const acceptOffer = async (offerData) => {
+  const acceptOffer = useCallback(async (offerData) => {
     console.log("🚀 ========== ACEPTANDO LLAMADA ==========");
     // offerData: { fromUserId, callMode, sdp }
     const { fromUserId, callMode: mode, sdp } = offerData;
@@ -871,8 +891,16 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     setRemoteMicMuted(false); // Resetear estado
     setRemoteVideoOff(false);
     setIsVideoOff(false);
-    iceCandidatesQueue.current = []; // Limpiar cola
+    
+    // IMPORTANTE: Preservar la cola de candidatos ICE recibidos antes de aceptar
+    // NO limpiar aquí - los candidatos que llegaron antes de aceptar deben procesarse
+    const candidatosEnColaAntes = iceCandidatesQueue.current.length;
     console.log("📞 Estados inicializados, remoteUserId:", fromUserId);
+    console.log("📞 Candidatos ICE en cola antes de aceptar:", candidatosEnColaAntes);
+    
+    // Hacer una copia de la cola ANTES de cualquier operación que pueda afectarla
+    const colaPreservada = [...iceCandidatesQueue.current];
+    console.log("📞 Cola preservada (copia):", colaPreservada.length, "candidatos");
 
     // crear o recrear pc
     if (pcRef.current) {
@@ -881,8 +909,18 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
       pcRef.current = null;
       dataChannelRef.current = null;
     }
+    
+    // Verificar que la cola no se haya perdido después de cerrar PC anterior
+    console.log("📞 Cola después de cerrar PC anterior:", iceCandidatesQueue.current.length);
+    if (candidatosEnColaAntes > 0 && iceCandidatesQueue.current.length === 0) {
+      console.error("❌ ERROR: Cola se perdió después de cerrar PC anterior! Restaurando...");
+      iceCandidatesQueue.current = [...colaPreservada];
+      console.log("✅ Cola restaurada:", iceCandidatesQueue.current.length, "candidatos");
+    }
+    
     const pc = createPeerConnection();
     console.log("📞 PeerConnection creado");
+    console.log("📞 Cola después de crear PC:", iceCandidatesQueue.current.length);
 
     // crear data channel estará en ondatachannel si el otro lo creó
     // primero setRemoteDescription (IMPORTANTE para no romper negociación)
@@ -906,6 +944,17 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     // ya están en la cola y se procesarán aquí
     console.log("📞 Procesando candidatos ICE en cola (pueden incluir candidatos recibidos antes de crear PC)...");
     console.log("📞 Candidatos en cola antes de procesar:", iceCandidatesQueue.current.length);
+    
+    // Si la cola se perdió pero tenemos una copia preservada, restaurarla
+    if (candidatosEnColaAntes > 0 && iceCandidatesQueue.current.length === 0) {
+      console.error("❌ ERROR CRÍTICO: Se perdieron candidatos ICE de la cola! Había", candidatosEnColaAntes, "y ahora hay 0");
+      if (colaPreservada.length > 0) {
+        console.log("🔄 Restaurando cola desde copia preservada...");
+        iceCandidatesQueue.current = [...colaPreservada];
+        console.log("✅ Cola restaurada:", iceCandidatesQueue.current.length, "candidatos");
+      }
+    }
+    
     await processIceQueue();
     console.log("📞 Candidatos procesados, cola restante:", iceCandidatesQueue.current.length);
 
@@ -971,12 +1020,12 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     console.log("✅✅✅ Llamada aceptada exitosamente, inCall = true");
     console.log("📞 Estado actual - inCall:", true, "remoteUserId:", remoteUserIdRef.current);
     if (onCallStateChange) onCallStateChange({ inCall: true, role: "callee" });
-  };
+  }, [onCallStateChange, sendSignal]);
 
   // ---------------------------
   // Manejar answer (caller recibe answer)
   // ---------------------------
-  const handleAnswer = async (data) => {
+  const handleAnswer = useCallback(async (data) => {
     console.log("🚀 ========== RECIBIENDO ANSWER ==========");
     console.log("📞 handleAnswer recibido - data completa:", data);
     const { sdp, fromUserId } = data;
@@ -1020,12 +1069,12 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
         iceConnectionState: pc.iceConnectionState
       });
     }
-  };
+  }, []);
 
   // ---------------------------
   // Manejar ICE candidate entrante
   // ---------------------------
-  const handleIceCandidate = async (data) => {
+  const handleIceCandidate = useCallback(async (data) => {
     const { candidate, fromUserId } = data;
     const candidateString = candidate.candidate || "";
     
@@ -1152,7 +1201,7 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
         });
       }
     }
-  };
+  }, [inCall]);
 
   // ---------------------------
   // Exponer handler para mensajes WS
@@ -1226,29 +1275,45 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
 
       case "RTC_ICE_CANDIDATE":
         console.log("📥 ========== RTC_ICE_CANDIDATE RECIBIDO ==========");
-        console.log("📥 Verificando datos del candidato:", {
+        console.log("📥 Mensaje completo recibido:", {
+          type: data.type,
           fromUserId: data.fromUserId,
+          toUserId: data.toUserId,
           hasCandidate: !!data.candidate,
-          candidateType: data.candidate?.candidate?.substring(0, 50) || "N/A",
+          candidateKeys: data.candidate ? Object.keys(data.candidate) : [],
+          candidatePreview: data.candidate?.candidate?.substring(0, 100) || "N/A",
           inCall: inCall,
-          hasPeerConnection: !!pcRef.current
+          hasPeerConnection: !!pcRef.current,
+          remoteUserId: remoteUser?.id,
+          wsReadyState: wsRef?.current?.readyState
         });
         
         if (!data.candidate) {
           logWarning(ErrorCodes.ICE_CANDIDATE_ERROR, "RTC_ICE_CANDIDATE recibido sin candidato", {
             fromUserId: data.fromUserId,
-            data: data
+            dataKeys: Object.keys(data || {}),
+            fullData: JSON.stringify(data).substring(0, 200)
+          });
+          break;
+        }
+        
+        if (!data.candidate.candidate) {
+          logWarning(ErrorCodes.ICE_CANDIDATE_ERROR, "RTC_ICE_CANDIDATE recibido con candidato inválido (sin campo candidate)", {
+            fromUserId: data.fromUserId,
+            candidateKeys: Object.keys(data.candidate || {})
           });
           break;
         }
         
         try {
+          console.log("📥 Llamando a handleIceCandidate...");
           await handleIceCandidate(data);
           console.log("✅ RTC_ICE_CANDIDATE procesado exitosamente");
         } catch (err) {
           logCriticalError(ErrorCodes.ICE_CANDIDATE_ERROR, "Error procesando RTC_ICE_CANDIDATE", {
             errorName: err.name,
             errorMessage: err.message,
+            errorStack: err.stack,
             fromUserId: data.fromUserId,
             candidate: data.candidate?.candidate?.substring(0, 100) || "N/A"
           });
@@ -1267,7 +1332,7 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
         // ignorar
         break;
     }
-  }, [onIncomingCall, endCall, inCall, remoteUser]); // Añadido inCall y remoteUser a dependencias
+  }, [onIncomingCall, endCall, inCall, remoteUser, acceptOffer, handleAnswer, handleIceCandidate, sendSignal]); // Funciones usadas dentro del callback
 
   // ---------------------------
   // Acción: mutear/desmutear micrófono
