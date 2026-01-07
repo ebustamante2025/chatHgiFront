@@ -181,6 +181,158 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     }
   };
 
+  // Función para obtener información de red del usuario
+  const getNetworkInfo = async (pc, role = "unknown") => {
+    if (!pc) return null;
+    
+    try {
+      const stats = await pc.getStats();
+      const networkInfo = {
+        role: role, // "caller" o "callee"
+        localUser: localUser ? { id: localUser.id, username: localUser.username } : null,
+        remoteUser: remoteUser ? { id: remoteUser.id } : null,
+        localIPs: {
+          private: [],
+          public: [],
+          turn: []
+        },
+        remoteIPs: {
+          private: [],
+          public: [],
+          turn: []
+        },
+        connectionInfo: {
+          signalingState: pc.signalingState,
+          iceConnectionState: pc.iceConnectionState,
+          connectionState: pc.connectionState,
+          iceGatheringState: pc.iceGatheringState
+        },
+        candidates: {
+          local: { host: 0, srflx: 0, relay: 0, total: 0 },
+          remote: { host: 0, srflx: 0, relay: 0, total: 0 },
+          pairs: 0,
+          activePairs: 0
+        }
+      };
+      
+      stats.forEach(report => {
+        // Candidatos locales
+        if (report.type === "local-candidate") {
+          networkInfo.candidates.local.total++;
+          const ip = report.ip || report.address;
+          if (report.candidateType === "host") {
+            networkInfo.candidates.local.host++;
+            if (ip && !networkInfo.localIPs.private.includes(ip)) {
+              networkInfo.localIPs.private.push(ip);
+            }
+          } else if (report.candidateType === "srflx") {
+            networkInfo.candidates.local.srflx++;
+            if (ip && !networkInfo.localIPs.public.includes(ip)) {
+              networkInfo.localIPs.public.push(ip);
+            }
+          } else if (report.candidateType === "relay") {
+            networkInfo.candidates.local.relay++;
+            if (ip && !networkInfo.localIPs.turn.includes(ip)) {
+              networkInfo.localIPs.turn.push(ip);
+            }
+          }
+        }
+        
+        // Candidatos remotos
+        if (report.type === "remote-candidate") {
+          networkInfo.candidates.remote.total++;
+          const ip = report.ip || report.address;
+          if (report.candidateType === "host") {
+            networkInfo.candidates.remote.host++;
+            if (ip && !networkInfo.remoteIPs.private.includes(ip)) {
+              networkInfo.remoteIPs.private.push(ip);
+            }
+          } else if (report.candidateType === "srflx") {
+            networkInfo.candidates.remote.srflx++;
+            if (ip && !networkInfo.remoteIPs.public.includes(ip)) {
+              networkInfo.remoteIPs.public.push(ip);
+            }
+          } else if (report.candidateType === "relay") {
+            networkInfo.candidates.remote.relay++;
+            if (ip && !networkInfo.remoteIPs.turn.includes(ip)) {
+              networkInfo.remoteIPs.turn.push(ip);
+            }
+          }
+        }
+        
+        // Pares de candidatos
+        if (report.type === "candidate-pair") {
+          networkInfo.candidates.pairs++;
+          if (report.state === "succeeded" || report.state === "in-progress") {
+            networkInfo.candidates.activePairs++;
+          }
+        }
+      });
+      
+      return networkInfo;
+    } catch (err) {
+      console.warn("⚠️ Error obteniendo información de red:", err);
+      return null;
+    }
+  };
+
+  // Función para mostrar información completa de la llamada
+  const logCallInfo = async (pc, role, mode, otherUser) => {
+    console.log("═══════════════════════════════════════════════════════════");
+    console.log(`📞 ${role === "caller" ? "INICIANDO LLAMADA" : "RECIBIENDO LLAMADA"}`);
+    console.log("═══════════════════════════════════════════════════════════");
+    
+    // Información de usuarios
+    console.log("👤 USUARIO LOCAL (YO):");
+    console.log("   - ID:", localUser?.id || "N/A");
+    console.log("   - Usuario:", localUser?.username || "N/A");
+    
+    console.log("👤 USUARIO REMOTO:");
+    console.log("   - ID:", otherUser?.id || remoteUser?.id || "N/A");
+    console.log("   - Usuario:", otherUser?.username || "N/A");
+    
+    console.log("📞 MODO DE LLAMADA:", mode);
+    console.log("   - Video:", mode === "video" ? "✅" : "❌");
+    console.log("   - Audio:", "✅");
+    console.log("   - Pantalla:", mode === "screen" ? "✅" : "❌");
+    
+    // Información de red
+    const networkInfo = await getNetworkInfo(pc, role);
+    if (networkInfo) {
+      console.log("🌐 INFORMACIÓN DE RED LOCAL:");
+      console.log("   - IPs Privadas:", networkInfo.localIPs.private.length > 0 ? networkInfo.localIPs.private.join(", ") : "N/A");
+      console.log("   - IP Pública:", networkInfo.localIPs.public.length > 0 ? networkInfo.localIPs.public[0] : "N/A (aún no descubierta)");
+      console.log("   - IP TURN:", networkInfo.localIPs.turn.length > 0 ? networkInfo.localIPs.turn[0] : "N/A (aún no generada)");
+      
+      console.log("🌐 INFORMACIÓN DE RED REMOTA:");
+      console.log("   - IPs Privadas:", networkInfo.remoteIPs.private.length > 0 ? networkInfo.remoteIPs.private.join(", ") : "Aún no recibidas");
+      console.log("   - IP Pública:", networkInfo.remoteIPs.public.length > 0 ? networkInfo.remoteIPs.public[0] : "Aún no recibida");
+      console.log("   - IP TURN:", networkInfo.remoteIPs.turn.length > 0 ? networkInfo.remoteIPs.turn[0] : "Aún no recibida");
+      
+      console.log("📊 ESTADO DE CANDIDATOS ICE:");
+      console.log("   - Candidatos Locales:", networkInfo.candidates.local.total, 
+                  `(Host: ${networkInfo.candidates.local.host}, STUN: ${networkInfo.candidates.local.srflx}, TURN: ${networkInfo.candidates.local.relay})`);
+      console.log("   - Candidatos Remotos:", networkInfo.candidates.remote.total,
+                  `(Host: ${networkInfo.candidates.remote.host}, STUN: ${networkInfo.candidates.remote.srflx}, TURN: ${networkInfo.candidates.remote.relay})`);
+      console.log("   - Pares de Candidatos:", networkInfo.candidates.pairs);
+      console.log("   - Pares Activos:", networkInfo.candidates.activePairs);
+      
+      console.log("🔌 ESTADO DE CONEXIÓN:");
+      console.log("   - Signaling State:", networkInfo.connectionInfo.signalingState);
+      console.log("   - ICE Connection State:", networkInfo.connectionInfo.iceConnectionState);
+      console.log("   - Connection State:", networkInfo.connectionInfo.connectionState);
+      console.log("   - ICE Gathering State:", networkInfo.connectionInfo.iceGatheringState);
+    }
+    
+    console.log("📋 DATOS NECESARIOS PARA LA LLAMADA:");
+    console.log("   ✅ PeerConnection creado");
+    console.log("   ✅ Servidores STUN/TURN configurados");
+    console.log("   ✅ WebSocket conectado:", wsRef.current?.readyState === WebSocket.OPEN ? "Sí" : "No");
+    console.log("   ✅ Permisos de media:", mode === "audio" ? "Micrófono" : mode === "screen" ? "Pantalla + Micrófono" : "Cámara + Micrófono");
+    console.log("   ⏳ Esperando intercambio de candidatos ICE...");
+    console.log("═══════════════════════════════════════════════════════════");
+  };
+
   // crea (o retorna) RTCPeerConnection
   const createPeerConnection = () => {
     if (pcRef.current) {
@@ -289,10 +441,29 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
             return;
           }
           
+          // Asegurar que todos los campos necesarios estén presentes
+          const candidateToSend = {
+            candidate: candidate.candidate,
+            sdpMLineIndex: candidate.sdpMLineIndex !== null && candidate.sdpMLineIndex !== undefined 
+              ? candidate.sdpMLineIndex 
+              : null,
+            sdpMid: candidate.sdpMid || null,
+          };
+          
+          // Log de validación antes de enviar
+          console.log("📋 Validación del candidato a enviar:", {
+            hasCandidate: !!candidateToSend.candidate,
+            hasSdpMLineIndex: candidateToSend.sdpMLineIndex !== null,
+            hasSdpMid: !!candidateToSend.sdpMid,
+            sdpMLineIndex: candidateToSend.sdpMLineIndex,
+            sdpMid: candidateToSend.sdpMid,
+            candidatePreview: candidateToSend.candidate.substring(0, 80)
+          });
+          
           sendSignal({
             type: "RTC_ICE_CANDIDATE",
             toUserId: targetUserId,
-            candidate: candidate,
+            candidate: candidateToSend,
           });
           console.log(`✅ Candidato #${sentCandidatesCountRef.current} enviado exitosamente`);
         } else {
@@ -350,6 +521,37 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
       
       if (state === "connected") {
         console.log("✅✅✅ Conexión WebRTC establecida exitosamente!");
+        
+        // Mostrar información completa de la conexión establecida
+        setTimeout(async () => {
+          // Determinar el rol basado en si tenemos remoteUser establecido desde startCall
+          const role = remoteUserIdRef.current && remoteUser ? "caller" : "callee";
+          const networkInfo = await getNetworkInfo(pcRef.current, role);
+          if (networkInfo) {
+            console.log("═══════════════════════════════════════════════════════════");
+            console.log("✅✅✅ CONEXIÓN ESTABLECIDA - INFORMACIÓN COMPLETA");
+            console.log("═══════════════════════════════════════════════════════════");
+            console.log("👤 USUARIO LOCAL:");
+            console.log("   - ID:", networkInfo.localUser?.id || "N/A");
+            console.log("   - Usuario:", networkInfo.localUser?.username || "N/A");
+            console.log("   - IP Privada:", networkInfo.localIPs.private.length > 0 ? networkInfo.localIPs.private.join(", ") : "N/A");
+            console.log("   - IP Pública:", networkInfo.localIPs.public.length > 0 ? networkInfo.localIPs.public[0] : "N/A");
+            console.log("   - IP TURN:", networkInfo.localIPs.turn.length > 0 ? networkInfo.localIPs.turn[0] : "N/A");
+            
+            console.log("👤 USUARIO REMOTO:");
+            console.log("   - ID:", networkInfo.remoteUser?.id || "N/A");
+            console.log("   - IP Privada:", networkInfo.remoteIPs.private.length > 0 ? networkInfo.remoteIPs.private.join(", ") : "N/A");
+            console.log("   - IP Pública:", networkInfo.remoteIPs.public.length > 0 ? networkInfo.remoteIPs.public[0] : "N/A");
+            console.log("   - IP TURN:", networkInfo.remoteIPs.turn.length > 0 ? networkInfo.remoteIPs.turn[0] : "N/A");
+            
+            console.log("📊 ESTADO FINAL:");
+            console.log("   - Pares de Candidatos:", networkInfo.candidates.pairs);
+            console.log("   - Pares Activos:", networkInfo.candidates.activePairs);
+            console.log("   - Connection State:", networkInfo.connectionInfo.connectionState);
+            console.log("   - ICE Connection State:", networkInfo.connectionInfo.iceConnectionState);
+            console.log("═══════════════════════════════════════════════════════════");
+          }
+        }, 1000);
       } else if (state === "disconnected") {
         console.warn("⚠️ Conexión WebRTC desconectada");
       } else if (state === "failed") {
@@ -619,7 +821,27 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     while (iceCandidatesQueue.current.length > 0) {
       const candidate = iceCandidatesQueue.current.shift();
       try {
-        await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+        // Validar y normalizar el candidato antes de añadirlo
+        const normalizedCandidate = {
+          candidate: candidate.candidate,
+          sdpMLineIndex: candidate.sdpMLineIndex !== null && candidate.sdpMLineIndex !== undefined 
+            ? candidate.sdpMLineIndex 
+            : null,
+          sdpMid: candidate.sdpMid || null,
+        };
+        
+        // Log de validación
+        if (processed === 0) { // Solo loggear el primero para no saturar
+          console.log("📋 Validando candidato de la cola:", {
+            hasCandidate: !!normalizedCandidate.candidate,
+            hasSdpMLineIndex: normalizedCandidate.sdpMLineIndex !== null,
+            hasSdpMid: !!normalizedCandidate.sdpMid,
+            sdpMLineIndex: normalizedCandidate.sdpMLineIndex,
+            sdpMid: normalizedCandidate.sdpMid
+          });
+        }
+        
+        await pcRef.current.addIceCandidate(new RTCIceCandidate(normalizedCandidate));
         processed++;
         console.log(`✅ ICE candidate ${processed}/${queueLength} añadido de la cola`);
       } catch (e) {
@@ -628,6 +850,8 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
           error: e.message,
           errorName: e.name,
           candidate: candidate?.candidate?.substring(0, 50) + "...",
+          hasSdpMLineIndex: candidate?.sdpMLineIndex !== undefined,
+          hasSdpMid: !!candidate?.sdpMid,
           processed: processed,
           failed: failed,
           remaining: iceCandidatesQueue.current.length
@@ -670,6 +894,11 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     console.log("📞 Creando PeerConnection...");
     const pc = createPeerConnection();
     console.log("📞 PeerConnection creado, ID:", pc ? "OK" : "ERROR");
+    
+    // Mostrar información de la llamada
+    setTimeout(async () => {
+      await logCallInfo(pc, "caller", mode, toUser);
+    }, 500); // Esperar un poco para que se generen algunos candidatos
     
     console.log("📞 Creando DataChannel...");
     const dc = pc.createDataChannel("data");
@@ -921,6 +1150,11 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     const pc = createPeerConnection();
     console.log("📞 PeerConnection creado");
     console.log("📞 Cola después de crear PC:", iceCandidatesQueue.current.length);
+    
+    // Mostrar información de la llamada entrante
+    setTimeout(async () => {
+      await logCallInfo(pc, "callee", mode, { id: fromUserId });
+    }, 500); // Esperar un poco para que se procesen algunos candidatos
 
     // crear data channel estará en ondatachannel si el otro lo creó
     // primero setRemoteDescription (IMPORTANTE para no romper negociación)
@@ -1136,7 +1370,17 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
         // ENCOLAR el candidato para procesarlo después
         console.log("📞 PeerConnection aún no creado, encolando candidato ICE para procesar después");
         console.log("📞 Candidato será procesado cuando se cree PeerConnection y se establezca remoteDescription");
-        iceCandidatesQueue.current.push(candidate);
+        
+        // Normalizar el candidato antes de encolarlo para asegurar que tenga todos los campos
+        const normalizedCandidate = {
+          candidate: candidate.candidate,
+          sdpMLineIndex: candidate.sdpMLineIndex !== null && candidate.sdpMLineIndex !== undefined 
+            ? candidate.sdpMLineIndex 
+            : null,
+          sdpMid: candidate.sdpMid || null,
+        };
+        
+        iceCandidatesQueue.current.push(normalizedCandidate);
         console.log("📞 Candidatos en cola:", iceCandidatesQueue.current.length);
         return;
       }
@@ -1154,7 +1398,17 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     if (!pc.remoteDescription) {
       // Si no hay descripción remota, encolar
       console.log("📞 Encolando ICE candidate (remoteDescription no lista)");
-      iceCandidatesQueue.current.push(candidate);
+      
+      // Normalizar el candidato antes de encolarlo
+      const normalizedCandidate = {
+        candidate: candidate.candidate,
+        sdpMLineIndex: candidate.sdpMLineIndex !== null && candidate.sdpMLineIndex !== undefined 
+          ? candidate.sdpMLineIndex 
+          : null,
+        sdpMid: candidate.sdpMid || null,
+      };
+      
+      iceCandidatesQueue.current.push(normalizedCandidate);
       console.log("📞 Candidatos en cola:", iceCandidatesQueue.current.length);
     } else {
       try {
@@ -1168,23 +1422,98 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
           return;
         }
         
-        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        // Validar y normalizar el candidato antes de añadirlo
+        // Asegurar que todos los campos estén presentes (pueden ser null pero deben estar definidos)
+        const normalizedCandidate = {
+          candidate: candidate.candidate,
+          sdpMLineIndex: candidate.sdpMLineIndex !== null && candidate.sdpMLineIndex !== undefined 
+            ? candidate.sdpMLineIndex 
+            : null,
+          sdpMid: candidate.sdpMid || null,
+        };
+        
+        // Log detallado del candidato antes de añadirlo
+        console.log("📋 Detalles del candidato a añadir:", {
+          candidate: normalizedCandidate.candidate?.substring(0, 100) || "N/A",
+          sdpMLineIndex: normalizedCandidate.sdpMLineIndex,
+          sdpMid: normalizedCandidate.sdpMid,
+          hasSdpMLineIndex: normalizedCandidate.sdpMLineIndex !== null,
+          hasSdpMid: !!normalizedCandidate.sdpMid,
+          originalSdpMLineIndex: candidate.sdpMLineIndex,
+          originalSdpMid: candidate.sdpMid,
+          signalingState: pc.signalingState,
+          iceConnectionState: pc.iceConnectionState,
+          hasLocalDescription: !!pc.localDescription,
+          hasRemoteDescription: !!pc.remoteDescription
+        });
+        
+        // Validar que el candidato tenga al menos el campo candidate
+        if (!normalizedCandidate.candidate) {
+          logWarning(ErrorCodes.ICE_CANDIDATE_ERROR, "Candidato sin campo 'candidate', ignorando", {
+            fromUserId: fromUserId,
+            receivedCount: receivedCandidatesCountRef.current
+          });
+          return;
+        }
+        
+        const iceCandidate = new RTCIceCandidate(normalizedCandidate);
+        await pc.addIceCandidate(iceCandidate);
         console.log(`✅ ICE candidate #${receivedCandidatesCountRef.current} añadido correctamente al PeerConnection`);
         console.log("📞 ICE Connection State después de añadir:", pc.iceConnectionState);
         
-        // Verificar cuántos candidatos remotos tenemos ahora
+        // Verificar cuántos candidatos remotos tenemos ahora y pares de candidatos
         if (pc.getStats) {
           pc.getStats().then(stats => {
             let remoteCount = 0;
+            let candidatePairs = 0;
+            let activePairs = 0;
+            
             stats.forEach(report => {
-              if (report.type === "remote-candidate") remoteCount++;
+              if (report.type === "remote-candidate") {
+                remoteCount++;
+              }
+              if (report.type === "candidate-pair") {
+                candidatePairs++;
+                if (report.state === "succeeded" || report.state === "in-progress") {
+                  activePairs++;
+                }
+              }
             });
-            console.log(`📊 Candidatos remotos en PeerConnection: ${remoteCount} (Recibidos: ${receivedCandidatesCountRef.current})`);
+            
+            console.log(`📊 Estadísticas ICE:`, {
+              candidatosRemotos: remoteCount,
+              candidatosRecibidosPorSignaling: receivedCandidatesCountRef.current,
+              paresDeCandidatos: candidatePairs,
+              paresActivos: activePairs,
+              iceConnectionState: pc.iceConnectionState,
+              connectionState: pc.connectionState
+            });
             
             if (remoteCount === 0 && receivedCandidatesCountRef.current > 0) {
               console.warn("⚠️ Candidatos recibidos pero no se añadieron al PeerConnection - Verificar formato de candidatos");
             }
-          }).catch(() => {});
+            
+            if (candidatePairs === 0 && remoteCount > 0) {
+              console.error("❌ CRÍTICO: Hay candidatos remotos pero no se formaron pares de candidatos - Posible problema de ufrag/pwd o timing");
+            }
+            
+            // Mostrar información del usuario remoto cuando recibimos suficientes candidatos
+            if (receivedCandidatesCountRef.current >= 3 && remoteCount > 0) {
+              console.log("═══════════════════════════════════════════════════════════");
+              console.log("📥 INFORMACIÓN DEL USUARIO REMOTO (RECIBIENDO LLAMADA)");
+              console.log("═══════════════════════════════════════════════════════════");
+              console.log("👤 Usuario Remoto:");
+              console.log("   - ID:", fromUserId);
+              console.log("   - Candidatos Recibidos:", receivedCandidatesCountRef.current);
+              console.log("   - Candidatos en PeerConnection:", remoteCount);
+              console.log("   - IP Privada:", ip && candidateType === "host" ? ip : "Aún no detectada");
+              console.log("   - IP Pública:", ip && candidateType === "srflx" ? ip : "Aún no detectada");
+              console.log("   - Usando TURN:", isTurn ? "✅ Sí" : "❌ No (intentando P2P)");
+              console.log("═══════════════════════════════════════════════════════════");
+            }
+          }).catch((err) => {
+            console.warn("⚠️ Error obteniendo estadísticas:", err);
+          });
         }
       } catch (e) {
         logCriticalError(ErrorCodes.ICE_CANDIDATE_ERROR, "Error añadiendo ICE candidate", {
