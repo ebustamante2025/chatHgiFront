@@ -131,6 +131,7 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
   const remoteUserIdRef = useRef(null);  // Ref para mantener el ID del usuario remoto
   const receivedCandidatesCountRef = useRef(0); // Contador de candidatos recibidos
   const sentCandidatesCountRef = useRef(0); // Contador de candidatos enviados
+  const pcIdRef = useRef(0); // Contador de PeerConnection ID para diagnóstico
 
   const [inCall, setInCall] = useState(false);
   const [callMode, setCallMode] = useState(null); // "video"|"audio"|"screen"
@@ -178,6 +179,324 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
         wsReadyState: wsRef.current?.readyState,
         errorStack: err.stack
       });
+    }
+  };
+
+  // Función para extraer ufrag del SDP
+  const extractUfragFromSdp = (sdp) => {
+    if (!sdp || typeof sdp !== 'string') return null;
+    const match = sdp.match(/a=ice-ufrag:(\S+)/);
+    return match ? match[1] : null;
+  };
+
+  // Función para verificar si un candidato coincide con el ufrag del SDP
+  const validateCandidateUfrag = (candidate, sdpUfrag) => {
+    if (!candidate || !candidate.candidate) return false;
+    const candidateStr = candidate.candidate;
+    const match = candidateStr.match(/ufrag\s+(\S+)/);
+    const candidateUfrag = match ? match[1] : null;
+    
+    if (!candidateUfrag) {
+      console.warn("⚠️ No se pudo extraer ufrag del candidato");
+      return true; // Si no se puede extraer, asumimos que es válido
+    }
+    
+    if (sdpUfrag && candidateUfrag !== sdpUfrag) {
+      console.error(`❌ ERROR: ufrag no coincide! SDP: ${sdpUfrag}, Candidato: ${candidateUfrag}`);
+      return false;
+    }
+    
+    return true;
+  };
+
+  // Función de diagnóstico completo del SDP
+  const diagnoseSdp = (sdp, label = "SDP") => {
+    if (!sdp) {
+      console.error(`❌ ${label}: No hay SDP disponible`);
+      return null;
+    }
+
+    const sdpStr = typeof sdp === 'string' ? sdp : (sdp.sdp || '');
+    if (!sdpStr) {
+      console.error(`❌ ${label}: SDP está vacío`);
+      return null;
+    }
+
+    console.log(`═══════════════════════════════════════════════════════════`);
+    console.log(`🔍 DIAGNÓSTICO COMPLETO DEL ${label.toUpperCase()}`);
+    console.log(`═══════════════════════════════════════════════════════════`);
+
+    // Extraer ufrag
+    const ufragMatch = sdpStr.match(/a=ice-ufrag:(\S+)/);
+    const ufrag = ufragMatch ? ufragMatch[1] : null;
+    console.log(`🔑 ufrag:`, ufrag ? `✅ ${ufrag}` : `❌ NO ENCONTRADO`);
+
+    // Extraer pwd (password)
+    const pwdMatch = sdpStr.match(/a=ice-pwd:(\S+)/);
+    const pwd = pwdMatch ? pwdMatch[1] : null;
+    console.log(`🔐 ice-pwd:`, pwd ? `✅ ${pwd.substring(0, 10)}...` : `❌ NO ENCONTRADO`);
+
+    // Contar líneas m= (media lines: audio, video)
+    const mediaLines = sdpStr.match(/^m=/gm);
+    const mediaCount = mediaLines ? mediaLines.length : 0;
+    console.log(`📹 Líneas de media (m=):`, mediaCount > 0 ? `✅ ${mediaCount}` : `❌ NINGUNA`);
+
+    // Verificar líneas de media
+    if (mediaLines) {
+      mediaLines.forEach((line, index) => {
+        const fullLine = sdpStr.substring(sdpStr.indexOf(line), sdpStr.indexOf('\n', sdpStr.indexOf(line)));
+        console.log(`   ${index + 1}. ${fullLine.trim()}`);
+      });
+    }
+
+    // Verificar fingerprint (seguridad)
+    const fingerprintMatch = sdpStr.match(/a=fingerprint:(\S+)\s+(\S+)/);
+    const fingerprint = fingerprintMatch ? fingerprintMatch[2] : null;
+    console.log(`🔒 Fingerprint:`, fingerprint ? `✅ ${fingerprint.substring(0, 20)}...` : `❌ NO ENCONTRADO`);
+
+    // Verificar servidores ICE en SDP
+    const iceServers = sdpStr.match(/a=ice-server:([^\r\n]+)/g);
+    console.log(`🌐 Servidores ICE en SDP:`, iceServers ? `✅ ${iceServers.length}` : `ℹ️ Usando configuración del PeerConnection`);
+
+    // Verificar candidatos embebidos en SDP (si los hay)
+    const embeddedCandidates = sdpStr.match(/a=candidate:/g);
+    const embeddedCount = embeddedCandidates ? embeddedCandidates.length : 0;
+    console.log(`📥 Candidatos embebidos en SDP:`, embeddedCount > 0 ? `✅ ${embeddedCount}` : `ℹ️ 0 (normal - se envían por separado)`);
+
+    console.log(`═══════════════════════════════════════════════════════════`);
+
+    return {
+      ufrag,
+      pwd,
+      mediaCount,
+      fingerprint: !!fingerprint,
+      valid: !!(ufrag && pwd && mediaCount > 0 && fingerprint)
+    };
+  };
+
+  // Función de diagnóstico completo de un candidato
+  const diagnoseCandidate = (candidate, index, sdpUfrag = null) => {
+    if (!candidate) {
+      console.error(`❌ Candidato #${index}: No hay datos`);
+      return null;
+    }
+
+    const candidateStr = candidate.candidate || '';
+    if (!candidateStr) {
+      console.error(`❌ Candidato #${index}: Campo 'candidate' vacío`);
+      return null;
+    }
+
+    console.log(`═══════════════════════════════════════════════════════════`);
+    console.log(`🔍 DIAGNÓSTICO DEL CANDIDATO #${index}`);
+    console.log(`═══════════════════════════════════════════════════════════`);
+
+    // Extraer ufrag del candidato
+    const ufragMatch = candidateStr.match(/ufrag\s+(\S+)/);
+    const candidateUfrag = ufragMatch ? ufragMatch[1] : null;
+    console.log(`🔑 ufrag:`, candidateUfrag ? `✅ ${candidateUfrag}` : `❌ NO ENCONTRADO`);
+
+    // Verificar coincidencia con SDP
+    if (sdpUfrag && candidateUfrag) {
+      if (candidateUfrag === sdpUfrag) {
+        console.log(`✅ ufrag coincide con SDP`);
+      } else {
+        console.error(`❌ ufrag NO coincide con SDP! Esperado: ${sdpUfrag}, Encontrado: ${candidateUfrag}`);
+      }
+    }
+
+    // Verificar sdpMLineIndex
+    console.log(`📍 sdpMLineIndex:`, 
+      candidate.sdpMLineIndex !== null && candidate.sdpMLineIndex !== undefined 
+        ? `✅ ${candidate.sdpMLineIndex}` 
+        : `❌ FALTA (null/undefined)`);
+
+    // Verificar sdpMid
+    console.log(`🏷️ sdpMid:`, 
+      candidate.sdpMid ? `✅ ${candidate.sdpMid}` : `❌ FALTA (null/undefined)`);
+
+    // Extraer tipo de candidato
+    let candidateType = "unknown";
+    let ip = "N/A";
+    let port = "N/A";
+    let isTurn = false;
+
+    if (candidateStr.includes("typ host")) {
+      candidateType = "HOST";
+    } else if (candidateStr.includes("typ srflx")) {
+      candidateType = "SRFLX";
+    } else if (candidateStr.includes("typ relay")) {
+      candidateType = "RELAY";
+      isTurn = true;
+    } else if (candidateStr.includes("typ prflx")) {
+      candidateType = "PRFLX";
+    }
+
+    const ipMatch = candidateStr.match(/(\d+\.\d+\.\d+\.\d+)/);
+    if (ipMatch) {
+      ip = ipMatch[1];
+    }
+
+    const portMatch = candidateStr.match(/port (\d+)/);
+    if (portMatch) {
+      port = portMatch[1];
+    }
+
+    console.log(`📡 Tipo:`, candidateType);
+    console.log(`🌐 IP:`, ip !== "N/A" ? `✅ ${ip}` : `❌ NO ENCONTRADA`);
+    console.log(`🔌 Puerto:`, port !== "N/A" ? `✅ ${port}` : `❌ NO ENCONTRADO`);
+    console.log(`🔀 Usando TURN:`, isTurn ? `✅ SÍ` : `❌ NO (P2P)`);
+
+    // Validación completa
+    const isValid = !!(
+      candidate.candidate &&
+      candidate.sdpMLineIndex !== null &&
+      candidate.sdpMid &&
+      candidateUfrag &&
+      (!sdpUfrag || candidateUfrag === sdpUfrag)
+    );
+
+    console.log(`✅ Validación:`, isValid ? `✅ CANDIDATO VÁLIDO` : `❌ CANDIDATO INVÁLIDO`);
+    console.log(`═══════════════════════════════════════════════════════════`);
+
+    return {
+      ufrag: candidateUfrag,
+      sdpMLineIndex: candidate.sdpMLineIndex,
+      sdpMid: candidate.sdpMid,
+      type: candidateType,
+      ip,
+      port,
+      isTurn,
+      valid: isValid
+    };
+  };
+
+  // Función de diagnóstico completo de getStats()
+  const diagnoseGetStats = async (pc, label = "PeerConnection") => {
+    if (!pc) {
+      console.error(`❌ ${label}: No hay PeerConnection disponible`);
+      return null;
+    }
+
+    try {
+      const stats = await pc.getStats();
+      console.log(`═══════════════════════════════════════════════════════════`);
+      console.log(`📊 DIAGNÓSTICO COMPLETO DE GETSTATS() - ${label}`);
+      console.log(`═══════════════════════════════════════════════════════════`);
+
+      let localCandidates = [];
+      let remoteCandidates = [];
+      let candidatePairs = [];
+      let localRelayCandidates = 0;
+      let remoteRelayCandidates = 0;
+
+      stats.forEach(report => {
+        if (report.type === "local-candidate") {
+          localCandidates.push({
+            id: report.id,
+            type: report.candidateType,
+            ip: report.ip || report.address,
+            port: report.port,
+            protocol: report.protocol
+          });
+          if (report.candidateType === "relay") localRelayCandidates++;
+        }
+
+        if (report.type === "remote-candidate") {
+          remoteCandidates.push({
+            id: report.id,
+            type: report.candidateType,
+            ip: report.ip || report.address,
+            port: report.port,
+            protocol: report.protocol
+          });
+          if (report.candidateType === "relay") remoteRelayCandidates++;
+        }
+
+        if (report.type === "candidate-pair") {
+          candidatePairs.push({
+            id: report.id,
+            state: report.state,
+            localCandidateId: report.localCandidateId,
+            remoteCandidateId: report.remoteCandidateId,
+            bytesSent: report.bytesSent || 0,
+            bytesReceived: report.bytesReceived || 0,
+            nominated: report.nominated || false
+          });
+        }
+      });
+
+      console.log(`📤 Candidatos Locales:`, localCandidates.length > 0 ? `✅ ${localCandidates.length}` : `❌ 0`);
+      localCandidates.forEach((c, i) => {
+        console.log(`   ${i + 1}. ${c.type} - ${c.ip}:${c.port} (${c.protocol})`);
+      });
+
+      console.log(`📥 Candidatos Remotos:`, remoteCandidates.length > 0 ? `✅ ${remoteCandidates.length}` : `❌ 0`);
+      if (remoteCandidates.length === 0) {
+        console.error(`   ⚠️ PROBLEMA: No hay candidatos remotos en getStats() - Los candidatos no se añadieron o fueron rechazados`);
+      } else {
+        remoteCandidates.forEach((c, i) => {
+          console.log(`   ${i + 1}. ${c.type} - ${c.ip}:${c.port} (${c.protocol})`);
+        });
+      }
+
+      console.log(`🔗 Pares de Candidatos:`, candidatePairs.length > 0 ? `✅ ${candidatePairs.length}` : `❌ 0`);
+      const succeededPairs = candidatePairs.filter(p => p.state === "succeeded");
+      const failedPairs = candidatePairs.filter(p => p.state === "failed");
+      const inProgressPairs = candidatePairs.filter(p => p.state === "in-progress");
+
+      console.log(`   - Exitosos: ${succeededPairs.length}`);
+      console.log(`   - En progreso: ${inProgressPairs.length}`);
+      console.log(`   - Fallidos: ${failedPairs.length}`);
+
+      if (succeededPairs.length > 0) {
+        succeededPairs.forEach((p, i) => {
+          console.log(`   ✅ Par exitoso ${i + 1}:`, {
+            bytesEnviados: p.bytesSent,
+            bytesRecibidos: p.bytesReceived,
+            nominado: p.nominated ? "✅ SÍ" : "❌ NO"
+          });
+        });
+      }
+
+      console.log(`🔀 Candidatos TURN:`, {
+        locales: localRelayCandidates > 0 ? `✅ ${localRelayCandidates}` : `❌ 0`,
+        remotos: remoteRelayCandidates > 0 ? `✅ ${remoteRelayCandidates}` : `❌ 0`
+      });
+
+      // Diagnóstico del problema
+      if (remoteCandidates.length === 0 && localCandidates.length > 0) {
+        console.error(`❌ PROBLEMA IDENTIFICADO: Hay candidatos locales pero NO hay candidatos remotos`);
+        console.error(`   Posibles causas:`);
+        console.error(`   1. Los candidatos remotos nunca se añadieron al PeerConnection`);
+        console.error(`   2. Los candidatos remotos fueron rechazados (ufrag incorrecto, formato inválido, etc.)`);
+        console.error(`   3. Los candidatos remotos llegaron antes de setRemoteDescription`);
+        console.error(`   4. Problema de sincronización/timing`);
+      }
+
+      if (candidatePairs.length === 0 && localCandidates.length > 0 && remoteCandidates.length > 0) {
+        console.error(`❌ PROBLEMA IDENTIFICADO: Hay candidatos locales y remotos pero NO hay pares`);
+        console.error(`   Posibles causas:`);
+        console.error(`   1. Los candidatos no son compatibles (diferentes tipos, NAT simétrico, etc.)`);
+        console.error(`   2. Problema con el servidor TURN`);
+        console.error(`   3. Firewall bloqueando la conexión`);
+      }
+
+      console.log(`═══════════════════════════════════════════════════════════`);
+
+      return {
+        localCandidates: localCandidates.length,
+        remoteCandidates: remoteCandidates.length,
+        candidatePairs: candidatePairs.length,
+        succeededPairs: succeededPairs.length,
+        failedPairs: failedPairs.length,
+        localRelayCandidates,
+        remoteRelayCandidates,
+        hasProblem: remoteCandidates.length === 0 || candidatePairs.length === 0
+      };
+    } catch (err) {
+      console.error(`❌ Error obteniendo estadísticas de ${label}:`, err);
+      return null;
     }
   };
 
@@ -336,10 +655,14 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
   // crea (o retorna) RTCPeerConnection
   const createPeerConnection = () => {
     if (pcRef.current) {
-      console.log("📞 PeerConnection ya existe, reutilizando");
+      console.log(`2️⃣ [PC-${pcIdRef.current}] PeerConnection ya existe, reutilizando`);
       return pcRef.current;
     }
 
+    // Incrementar ID del PeerConnection para diagnóstico
+    pcIdRef.current++;
+    const currentPcId = pcIdRef.current;
+    console.log(`2️⃣ [PC-${currentPcId}] Creando nuevo PeerConnection`);
     console.log("📞 Creando nuevo RTCPeerConnection con ICE servers:", ICE_SERVERS);
     console.log("🌐 ========== CONFIGURACIÓN DE SERVIDORES ICE ==========");
     ICE_SERVERS.forEach((server, index) => {
@@ -769,6 +1092,7 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     };
 
     pcRef.current = pc;
+    console.log(`2️⃣ [PC-${pcIdRef.current}] PeerConnection asignado a pcRef.current`);
     return pc;
   };
 
@@ -841,9 +1165,121 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
           });
         }
         
-        await pcRef.current.addIceCandidate(new RTCIceCandidate(normalizedCandidate));
-        processed++;
-        console.log(`✅ ICE candidate ${processed}/${queueLength} añadido de la cola`);
+        try {
+          const currentPcId = pcIdRef.current;
+          
+          // 2️⃣ LOG DIAGNÓSTICO: Candidato de la cola antes de añadir
+          console.log(`2️⃣ ========== PROCESANDO CANDIDATO DE COLA ==========`);
+          console.log(`2️⃣ [PC-${currentPcId}] [Cola ${processed + 1}/${queueLength}] Objeto completo:`, JSON.stringify({
+            candidate: normalizedCandidate.candidate || null,
+            sdpMLineIndex: normalizedCandidate.sdpMLineIndex,
+            sdpMid: normalizedCandidate.sdpMid,
+            tipoSdpMLineIndex: typeof normalizedCandidate.sdpMLineIndex,
+            tipoSdpMid: typeof normalizedCandidate.sdpMid,
+            tieneCandidate: !!normalizedCandidate.candidate,
+            tieneSdpMLineIndex: normalizedCandidate.sdpMLineIndex !== null && normalizedCandidate.sdpMLineIndex !== undefined,
+            tieneSdpMid: !!normalizedCandidate.sdpMid
+          }, null, 2));
+          console.log(`2️⃣ [PC-${currentPcId}] [Cola ${processed + 1}/${queueLength}] Validación de campos:`);
+          console.log(`2️⃣   - candidate:`, normalizedCandidate.candidate ? `✅ "${normalizedCandidate.candidate.substring(0, 80)}..."` : "❌ FALTA");
+          console.log(`2️⃣   - sdpMLineIndex:`, normalizedCandidate.sdpMLineIndex !== null && normalizedCandidate.sdpMLineIndex !== undefined ? `✅ ${normalizedCandidate.sdpMLineIndex} (${typeof normalizedCandidate.sdpMLineIndex})` : "❌ FALTA o null");
+          console.log(`2️⃣   - sdpMid:`, normalizedCandidate.sdpMid ? `✅ "${normalizedCandidate.sdpMid}" (${typeof normalizedCandidate.sdpMid})` : "❌ FALTA o null");
+          
+          // Validar ufrag del candidato contra el SDP remoto si está disponible
+          if (pcRef.current.remoteDescription) {
+            const remoteSdpUfrag = extractUfragFromSdp(pcRef.current.remoteDescription.sdp);
+            if (remoteSdpUfrag) {
+              if (!validateCandidateUfrag(normalizedCandidate, remoteSdpUfrag)) {
+                const candidateStr = normalizedCandidate.candidate || "N/A";
+                const candidateUfrag = candidateStr.match(/ufrag\s+(\S+)/)?.[1] || "N/A";
+                console.error(`❌ Candidato ${processed + 1} rechazado en cola: ufrag ${candidateUfrag} no coincide con SDP ${remoteSdpUfrag}`);
+                failed++;
+                continue; // Saltar este candidato
+              }
+            }
+          }
+          
+          // 2️⃣ LOG DIAGNÓSTICO: Antes de addIceCandidate desde cola
+          console.log(`2️⃣ [PC-${currentPcId}] [Cola ${processed + 1}/${queueLength}] Estado del PC antes de addIceCandidate:`);
+          console.log(`2️⃣   - signalingState: ${pcRef.current.signalingState}`);
+          console.log(`2️⃣   - iceConnectionState: ${pcRef.current.iceConnectionState}`);
+          console.log(`2️⃣   - connectionState: ${pcRef.current.connectionState}`);
+          console.log(`2️⃣   - hasRemoteDescription: ${!!pcRef.current.remoteDescription}`);
+          console.log(`2️⃣   - hasLocalDescription: ${!!pcRef.current.localDescription}`);
+          
+          const iceCandidate = new RTCIceCandidate(normalizedCandidate);
+          const addStartTime = Date.now();
+          console.log(`2️⃣ [PC-${currentPcId}] [Cola ${processed + 1}/${queueLength}] Ejecutando: await pcRef.current.addIceCandidate(iceCandidate)...`);
+          
+          await pcRef.current.addIceCandidate(iceCandidate);
+          
+          const addDuration = Date.now() - addStartTime;
+          processed++;
+          console.log(`2️⃣ [PC-${currentPcId}] [Cola ${processed}/${queueLength}] ✅ addIceCandidate() EXITOSO`);
+          console.log(`2️⃣   - Duración: ${addDuration}ms`);
+          console.log(`2️⃣   - Estado después: iceConnectionState=${pcRef.current.iceConnectionState}`);
+          console.log(`2️⃣ ==================================================`);
+          
+          console.log(`✅ ICE candidate ${processed}/${queueLength} añadido de la cola`);
+          
+          // Verificar que se añadió correctamente después de un breve delay
+          setTimeout(async () => {
+            try {
+              const stats = await pcRef.current.getStats();
+              let remoteCount = 0;
+              stats.forEach(report => {
+                if (report.type === "remote-candidate") remoteCount++;
+              });
+              if (processed <= 2) { // Solo loggear los primeros para no saturar
+                console.log(`🔍 Verificación cola: ${remoteCount} candidatos remotos en PC después de añadir ${processed}`);
+                if (remoteCount < processed) {
+                  console.warn(`⚠️ ADVERTENCIA: Se añadieron ${processed} pero solo ${remoteCount} aparecen en getStats() - Algunos candidatos fueron rechazados`);
+                }
+              }
+            } catch (e) {
+              // Ignorar errores de verificación
+            }
+          }, 100); // Aumentar delay para dar tiempo al navegador
+        } catch (queueError) {
+          // 2️⃣ LOG DIAGNÓSTICO: Error en addIceCandidate desde cola
+          const currentPcId = pcIdRef.current;
+          console.error(`2️⃣ ========== ERROR EN addIceCandidate() DESDE COLA ==========`);
+          console.error(`2️⃣ [PC-${currentPcId}] [Cola ${processed + 1}/${queueLength}] ❌ addIceCandidate() FALLÓ`);
+          console.error(`2️⃣   - Error Name: ${queueError.name}`);
+          console.error(`2️⃣   - Error Message: ${queueError.message}`);
+          console.error(`2️⃣   - Error Code: ${queueError.code || "N/A"}`);
+          console.error(`2️⃣   - Error Stack:`, queueError.stack);
+          console.error(`2️⃣   - Candidato que falló:`, {
+            candidate: normalizedCandidate.candidate?.substring(0, 80) || "N/A",
+            sdpMLineIndex: normalizedCandidate.sdpMLineIndex,
+            sdpMid: normalizedCandidate.sdpMid,
+            tipoSdpMLineIndex: typeof normalizedCandidate.sdpMLineIndex,
+            tipoSdpMid: typeof normalizedCandidate.sdpMid
+          });
+          console.error(`2️⃣   - Estado del PC:`, {
+            signalingState: pcRef.current?.signalingState,
+            iceConnectionState: pcRef.current?.iceConnectionState,
+            connectionState: pcRef.current?.connectionState,
+            hasRemoteDescription: !!pcRef.current?.remoteDescription,
+            hasLocalDescription: !!pcRef.current?.localDescription
+          });
+          console.error("2️⃣ ========================================================");
+          
+          // Si falla al añadir, el candidato podría ser inválido
+          failed++;
+          logCriticalError(ErrorCodes.ICE_CANDIDATE_ERROR, "Error añadiendo ICE candidate de la cola", {
+            errorName: queueError.name,
+            errorMessage: queueError.message,
+            errorCode: queueError.code,
+            candidate: normalizedCandidate.candidate?.substring(0, 80) || "N/A",
+            sdpMLineIndex: normalizedCandidate.sdpMLineIndex,
+            sdpMid: normalizedCandidate.sdpMid,
+            processed: processed,
+            remaining: iceCandidatesQueue.current.length,
+            note: "Este candidato será descartado y la conexión continuará con los demás"
+          });
+          // NO re-lanzar el error, continuar con los demás candidatos
+        }
       } catch (e) {
         failed++;
         logCriticalError(ErrorCodes.ICE_CANDIDATE_ERROR, "Error añadiendo ICE candidate de la cola", {
@@ -1159,9 +1595,22 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     // crear data channel estará en ondatachannel si el otro lo creó
     // primero setRemoteDescription (IMPORTANTE para no romper negociación)
     console.log("📞 Estableciendo RemoteDescription...");
+    
+    // DIAGNÓSTICO: Verificar el SDP antes de establecerlo
+    const sdpDiagnosis = diagnoseSdp(sdp, "OFFER RECIBIDO");
+    
     try {
       await pc.setRemoteDescription(new RTCSessionDescription(sdp));
       console.log("✅ RemoteDescription establecido, signalingState:", pc.signalingState);
+      
+      // IMPORTANTE: Esperar un momento para que setRemoteDescription se procese completamente
+      // Esto asegura que el navegador esté listo para recibir candidatos
+      await new Promise(resolve => setTimeout(resolve, 50));
+      console.log("⏳ Espera post-setRemoteDescription completada, listo para candidatos");
+      
+      // DIAGNÓSTICO: Verificar getStats() inmediatamente después de setRemoteDescription
+      console.log("🔍 Diagnóstico inicial de getStats() después de setRemoteDescription...");
+      await diagnoseGetStats(pc, "DESPUÉS DE SETREMOTEDESCRIPTION");
     } catch (err) {
       logCriticalError(ErrorCodes.SET_REMOTE_DESCRIPTION_FAILED, "Error estableciendo RemoteDescription en acceptOffer", {
         errorName: err.name,
@@ -1179,6 +1628,44 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     console.log("📞 Procesando candidatos ICE en cola (pueden incluir candidatos recibidos antes de crear PC)...");
     console.log("📞 Candidatos en cola antes de procesar:", iceCandidatesQueue.current.length);
     
+    // Extraer ufrag del SDP del offer para validar candidatos
+    const sdpUfrag = extractUfragFromSdp(sdp?.sdp || (typeof sdp === 'string' ? sdp : sdp?.sdp));
+    if (sdpUfrag) {
+      console.log("🔑 ufrag extraído del SDP del offer:", sdpUfrag);
+      console.log("🔍 Validando candidatos en cola contra ufrag del SDP...");
+      
+      // Filtrar candidatos que no coincidan con el ufrag del SDP
+      const candidatosValidos = [];
+      const candidatosInvalidos = [];
+      
+      iceCandidatesQueue.current.forEach((candidate, index) => {
+        if (validateCandidateUfrag(candidate, sdpUfrag)) {
+          candidatosValidos.push(candidate);
+        } else {
+          candidatosInvalidos.push({ index, candidate });
+        }
+      });
+      
+      if (candidatosInvalidos.length > 0) {
+        console.error(`❌ ERROR: ${candidatosInvalidos.length} candidatos tienen ufrag incorrecto y serán descartados`);
+        candidatosInvalidos.forEach(c => {
+          const candidateStr = c.candidate?.candidate || "N/A";
+          const candidateUfrag = candidateStr.match(/ufrag\s+(\S+)/)?.[1] || "N/A";
+          console.error(`   - Candidato ${c.index + 1}: ufrag ${candidateUfrag} (esperado: ${sdpUfrag})`);
+        });
+      }
+      
+      if (candidatosValidos.length !== iceCandidatesQueue.current.length) {
+        console.warn(`⚠️ Filtrando candidatos: ${iceCandidatesQueue.current.length} → ${candidatosValidos.length} válidos`);
+        iceCandidatesQueue.current = candidatosValidos;
+        console.log("✅ Cola filtrada:", iceCandidatesQueue.current.length, "candidatos válidos");
+      } else {
+        console.log("✅ Todos los candidatos en cola tienen ufrag válido");
+      }
+    } else {
+      console.warn("⚠️ No se pudo extraer ufrag del SDP, no se validarán candidatos");
+    }
+    
     // Si la cola se perdió pero tenemos una copia preservada, restaurarla
     if (candidatosEnColaAntes > 0 && iceCandidatesQueue.current.length === 0) {
       console.error("❌ ERROR CRÍTICO: Se perdieron candidatos ICE de la cola! Había", candidatosEnColaAntes, "y ahora hay 0");
@@ -1189,8 +1676,24 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
       }
     }
     
+    // Procesar candidatos ANTES de añadir tracks y crear answer
+    // Esto asegura que los candidatos remotos estén disponibles cuando creamos el answer
     await processIceQueue();
     console.log("📞 Candidatos procesados, cola restante:", iceCandidatesQueue.current.length);
+    
+    // DIAGNÓSTICO COMPLETO: Verificar getStats() después de procesar la cola
+    console.log("🔍 Diagnóstico completo de getStats() después de procesar cola...");
+    const statsDiagnosis = await diagnoseGetStats(pc, "DESPUÉS DE PROCESAR COLA");
+    
+    if (statsDiagnosis && statsDiagnosis.remoteCandidates === 0 && candidatosEnColaAntes > 0) {
+      console.error(`❌ PROBLEMA CRÍTICO: Se procesaron ${candidatosEnColaAntes} candidatos pero 0 aparecen en getStats()`);
+      console.error(`   Esto indica que los candidatos fueron rechazados silenciosamente`);
+      console.error(`   Posibles causas:`);
+      console.error(`   1. ufrag incorrecto (ya validado arriba)`);
+      console.error(`   2. Formato de candidato inválido`);
+      console.error(`   3. sdpMLineIndex o sdpMid incorrectos`);
+      console.error(`   4. Candidatos de una sesión ICE anterior`);
+    }
 
     // obtener media local (según modo) y añadir tracks
     try {
@@ -1231,6 +1734,18 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
       
       await pc.setLocalDescription(answer);
       console.log("✅ LocalDescription establecido, signalingState:", pc.signalingState);
+      
+      // IMPORTANTE: Después de setLocalDescription, verificar si hay más candidatos en cola
+      // (pueden haber llegado mientras creábamos el answer)
+      // También re-procesar candidatos que pudieron haber fallado antes
+      if (iceCandidatesQueue.current.length > 0) {
+        console.log(`📞 Procesando ${iceCandidatesQueue.current.length} candidatos adicionales después de setLocalDescription...`);
+        await processIceQueue();
+      }
+      
+      // DIAGNÓSTICO COMPLETO: Verificar getStats() después de setLocalDescription
+      console.log("🔍 Diagnóstico completo de getStats() después de setLocalDescription...");
+      await diagnoseGetStats(pc, "DESPUÉS DE SETLOCALDESCRIPTION");
 
       console.log("📞 Enviando answer a usuario:", fromUserId);
       sendSignal({
@@ -1340,6 +1855,26 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     }
     
     receivedCandidatesCountRef.current++;
+    
+    // 2️⃣ LOG DIAGNÓSTICO: Objeto completo del candidato recibido
+    console.log("2️⃣ ========== CANDIDATO RECIBIDO (OBJETO COMPLETO) ==========");
+    console.log("2️⃣ [Candidato #" + receivedCandidatesCountRef.current + "] Objeto completo:", JSON.stringify({
+      candidate: candidate.candidate || null,
+      sdpMLineIndex: candidate.sdpMLineIndex,
+      sdpMid: candidate.sdpMid,
+      tipoSdpMLineIndex: typeof candidate.sdpMLineIndex,
+      tipoSdpMid: typeof candidate.sdpMid,
+      tieneCandidate: !!candidate.candidate,
+      tieneSdpMLineIndex: candidate.sdpMLineIndex !== null && candidate.sdpMLineIndex !== undefined,
+      tieneSdpMid: !!candidate.sdpMid,
+      fromUserId: fromUserId
+    }, null, 2));
+    console.log("2️⃣ [Candidato #" + receivedCandidatesCountRef.current + "] Validación de campos:");
+    console.log("2️⃣   - candidate:", candidate.candidate ? `✅ "${candidate.candidate.substring(0, 80)}..."` : "❌ FALTA");
+    console.log("2️⃣   - sdpMLineIndex:", candidate.sdpMLineIndex !== null && candidate.sdpMLineIndex !== undefined ? `✅ ${candidate.sdpMLineIndex} (${typeof candidate.sdpMLineIndex})` : "❌ FALTA o null");
+    console.log("2️⃣   - sdpMid:", candidate.sdpMid ? `✅ "${candidate.sdpMid}" (${typeof candidate.sdpMid})` : "❌ FALTA o null");
+    console.log("2️⃣ ==========================================================");
+    
     console.log("🌐 ========== ICE CANDIDATO RECIBIDO ==========");
     console.log(`📥 Candidato remoto #${receivedCandidatesCountRef.current} recibido`);
     console.log("👤 De usuario:", fromUserId);
@@ -1354,6 +1889,8 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     }
     
     const pc = pcRef.current;
+    const currentPcId = pcIdRef.current;
+    console.log(`2️⃣ [PC-${currentPcId}] PeerConnection actual:`, pc ? "✅ Existe" : "❌ No existe");
     if (!pc) {
       // Si no hay PeerConnection, puede ser porque:
       // 1. La llamada ya terminó (normal - candidatos tardíos)
@@ -1456,10 +1993,130 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
           return;
         }
         
-        const iceCandidate = new RTCIceCandidate(normalizedCandidate);
-        await pc.addIceCandidate(iceCandidate);
-        console.log(`✅ ICE candidate #${receivedCandidatesCountRef.current} añadido correctamente al PeerConnection`);
-        console.log("📞 ICE Connection State después de añadir:", pc.iceConnectionState);
+        // Validar ufrag del candidato contra el SDP remoto si está disponible
+        if (pc.remoteDescription) {
+          const remoteSdpUfrag = extractUfragFromSdp(pc.remoteDescription.sdp);
+          if (remoteSdpUfrag) {
+            // DIAGNÓSTICO: Diagnosticar candidato antes de validar (solo los primeros 3)
+            if (receivedCandidatesCountRef.current <= 3) {
+              diagnoseCandidate(normalizedCandidate, receivedCandidatesCountRef.current, remoteSdpUfrag);
+            }
+            
+            if (!validateCandidateUfrag(normalizedCandidate, remoteSdpUfrag)) {
+              logCriticalError(ErrorCodes.ICE_CANDIDATE_ERROR, "Candidato rechazado: ufrag no coincide con SDP remoto", {
+                fromUserId: fromUserId,
+                candidateNumber: receivedCandidatesCountRef.current,
+                candidateUfrag: normalizedCandidate.candidate?.match(/ufrag\s+(\S+)/)?.[1] || "N/A",
+                sdpUfrag: remoteSdpUfrag,
+                candidate: normalizedCandidate.candidate?.substring(0, 80) || "N/A",
+                note: "Este candidato será descartado - no pertenece a esta sesión ICE"
+              });
+              return; // Descartar candidato con ufrag incorrecto
+            }
+            console.log(`✅ ufrag del candidato coincide con SDP remoto: ${remoteSdpUfrag}`);
+          }
+        }
+        
+        try {
+          const iceCandidate = new RTCIceCandidate(normalizedCandidate);
+          const currentPcId = pcIdRef.current;
+          
+          // 2️⃣ LOG DIAGNÓSTICO: Antes de addIceCandidate
+          console.log("2️⃣ ========== INTENTANDO addIceCandidate() ==========");
+          console.log(`2️⃣ [PC-${currentPcId}] [Candidato #${receivedCandidatesCountRef.current}] Antes de addIceCandidate:`);
+          console.log("2️⃣   - Objeto RTCIceCandidate creado:", {
+            candidate: normalizedCandidate.candidate?.substring(0, 80) || "N/A",
+            sdpMLineIndex: normalizedCandidate.sdpMLineIndex,
+            sdpMid: normalizedCandidate.sdpMid,
+            tipoSdpMLineIndex: typeof normalizedCandidate.sdpMLineIndex,
+            tipoSdpMid: typeof normalizedCandidate.sdpMid
+          });
+          console.log(`2️⃣   - PeerConnection ID: ${currentPcId}`);
+          console.log(`2️⃣   - signalingState: ${pc.signalingState}`);
+          console.log(`2️⃣   - iceConnectionState: ${pc.iceConnectionState}`);
+          console.log(`2️⃣   - connectionState: ${pc.connectionState}`);
+          console.log(`2️⃣   - hasRemoteDescription: ${!!pc.remoteDescription}`);
+          console.log(`2️⃣   - hasLocalDescription: ${!!pc.localDescription}`);
+          
+          // Verificar que el candidato sea válido antes de añadirlo
+          console.log("📋 Candidato normalizado:", {
+            candidate: normalizedCandidate.candidate?.substring(0, 80) || "N/A",
+            sdpMLineIndex: normalizedCandidate.sdpMLineIndex,
+            sdpMid: normalizedCandidate.sdpMid,
+            iceConnectionState: pc.iceConnectionState,
+            signalingState: pc.signalingState
+          });
+          
+          // 2️⃣ LOG DIAGNÓSTICO: Ejecutando addIceCandidate con await
+          const addStartTime = Date.now();
+          console.log(`2️⃣ [PC-${currentPcId}] [Candidato #${receivedCandidatesCountRef.current}] Ejecutando: await pc.addIceCandidate(iceCandidate)...`);
+          
+          await pc.addIceCandidate(iceCandidate);
+          
+          const addDuration = Date.now() - addStartTime;
+          console.log(`2️⃣ [PC-${currentPcId}] [Candidato #${receivedCandidatesCountRef.current}] ✅ addIceCandidate() EXITOSO`);
+          console.log(`2️⃣   - Duración: ${addDuration}ms`);
+          console.log(`2️⃣   - Estado después: iceConnectionState=${pc.iceConnectionState}, signalingState=${pc.signalingState}`);
+          console.log("2️⃣ ==================================================");
+          
+          console.log(`✅ ICE candidate #${receivedCandidatesCountRef.current} añadido correctamente al PeerConnection`);
+          console.log("📞 ICE Connection State después de añadir:", pc.iceConnectionState);
+          
+          // DIAGNÓSTICO: Verificar periódicamente getStats() después de añadir candidatos
+          // Solo para los primeros 3 candidatos para no saturar
+          if (receivedCandidatesCountRef.current <= 3 || receivedCandidatesCountRef.current % 5 === 0) {
+            setTimeout(async () => {
+              try {
+                console.log(`🔍 Diagnóstico periódico de getStats() después de añadir candidato #${receivedCandidatesCountRef.current}...`);
+                await diagnoseGetStats(pc, `DESPUÉS DE AÑADIR CANDIDATO #${receivedCandidatesCountRef.current}`);
+              } catch (e) {
+                console.warn("⚠️ Error en diagnóstico periódico:", e);
+              }
+            }, 200);
+          }
+          
+        } catch (addError) {
+          // 2️⃣ LOG DIAGNÓSTICO: Error en addIceCandidate
+          const currentPcId = pcIdRef.current;
+          console.error("2️⃣ ========== ERROR EN addIceCandidate() ==========");
+          console.error(`2️⃣ [PC-${currentPcId}] [Candidato #${receivedCandidatesCountRef.current}] ❌ addIceCandidate() FALLÓ`);
+          console.error(`2️⃣   - Error Name: ${addError.name}`);
+          console.error(`2️⃣   - Error Message: ${addError.message}`);
+          console.error(`2️⃣   - Error Code: ${addError.code || "N/A"}`);
+          console.error(`2️⃣   - Error Stack:`, addError.stack);
+          console.error(`2️⃣   - Candidato que falló:`, {
+            candidate: normalizedCandidate.candidate?.substring(0, 80) || "N/A",
+            sdpMLineIndex: normalizedCandidate.sdpMLineIndex,
+            sdpMid: normalizedCandidate.sdpMid,
+            tipoSdpMLineIndex: typeof normalizedCandidate.sdpMLineIndex,
+            tipoSdpMid: typeof normalizedCandidate.sdpMid
+          });
+          console.error(`2️⃣   - Estado del PC:`, {
+            signalingState: pc.signalingState,
+            iceConnectionState: pc.iceConnectionState,
+            connectionState: pc.connectionState,
+            hasRemoteDescription: !!pc.remoteDescription,
+            hasLocalDescription: !!pc.localDescription
+          });
+          console.error("2️⃣ ================================================");
+          
+          // El error podría ser silencioso, capturarlo explícitamente
+          logCriticalError(ErrorCodes.ICE_CANDIDATE_ERROR, "Error añadiendo ICE candidate (puede ser rechazado silenciosamente)", {
+            errorName: addError.name,
+            errorMessage: addError.message,
+            errorCode: addError.code,
+            fromUserId: fromUserId,
+            candidateNumber: receivedCandidatesCountRef.current,
+            candidate: normalizedCandidate.candidate?.substring(0, 80) || "N/A",
+            sdpMLineIndex: normalizedCandidate.sdpMLineIndex,
+            sdpMid: normalizedCandidate.sdpMid,
+            iceConnectionState: pc.iceConnectionState,
+            signalingState: pc.signalingState,
+            hasRemoteDescription: !!pc.remoteDescription,
+            note: "Si el error es 'InvalidStateError', el candidato puede no ser válido para esta sesión ICE"
+          });
+          throw addError; // Re-lanzar para que se maneje en el catch externo
+        }
         
         // Verificar cuántos candidatos remotos tenemos ahora y pares de candidatos
         if (pc.getStats) {
