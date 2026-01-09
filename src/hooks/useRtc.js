@@ -3,10 +3,13 @@ import { useRef, useState, useCallback, useEffect } from "react";
 // Servidores STUN/TURN para WebRTC
 // STUN: Descubre IP pública (gratis, Google)
 // TURN: Relay cuando P2P directo falla (tu servidor)
+// IMPORTANTE: El servidor TURN debe tener abiertos los puertos 49160-49199 para transporte de media UDP
 const ICE_SERVERS = [
   // STUN servers (descubrimiento de IP pública)
   { urls: "stun:stun.l.google.com:19302" },
   // TURN server (relay cuando P2P directo no funciona)
+  // Puerto 3478 es el puerto de control TURN
+  // Puertos 49160-49199 son los puertos dinámicos UDP para transporte de media (RTP/RTCP)
   {
     urls: [
       "turn:turn.hginet.com.co:3478?transport=udp",
@@ -16,6 +19,10 @@ const ICE_SERVERS = [
     credential: "Laverdad2026*"
   }
 ];
+
+// Rango de puertos esperados para transporte de media TURN
+const TURN_MEDIA_PORT_MIN = 49160;
+const TURN_MEDIA_PORT_MAX = 49199;
 
 // ============================================
 // SISTEMA DE MANEJO DE ERRORES CENTRALIZADO
@@ -480,6 +487,24 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
         console.error(`   1. Los candidatos no son compatibles (diferentes tipos, NAT simétrico, etc.)`);
         console.error(`   2. Problema con el servidor TURN`);
         console.error(`   3. Firewall bloqueando la conexión`);
+        console.error(`   4. Puertos TURN fuera del rango ${TURN_MEDIA_PORT_MIN}-${TURN_MEDIA_PORT_MAX} (verificar logs de candidatos TURN arriba)`);
+        
+        // Verificar si hay candidatos TURN con puertos fuera del rango
+        const turnCandidatesFueraRango = remoteCandidates.filter(c => {
+          if (c.type === "relay" && c.port) {
+            const portNum = parseInt(c.port, 10);
+            return portNum < TURN_MEDIA_PORT_MIN || portNum > TURN_MEDIA_PORT_MAX;
+          }
+          return false;
+        });
+        
+        if (turnCandidatesFueraRango.length > 0) {
+          console.error(`   ⚠️ ADVERTENCIA: ${turnCandidatesFueraRango.length} candidatos TURN tienen puertos fuera del rango ${TURN_MEDIA_PORT_MIN}-${TURN_MEDIA_PORT_MAX}`);
+          turnCandidatesFueraRango.forEach(c => {
+            console.error(`      - Puerto ${c.port} (IP: ${c.ip})`);
+          });
+          console.error(`   💡 SOLUCIÓN: Abrir puertos UDP ${TURN_MEDIA_PORT_MIN}-${TURN_MEDIA_PORT_MAX} en el firewall del servidor TURN`);
+        }
       }
 
       console.log(`═══════════════════════════════════════════════════════════`);
@@ -673,6 +698,8 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
         });
         console.log(`      - Username: ${server.username || "N/A"}`);
         console.log(`      - Credential: ${server.credential ? "***" : "N/A"}`);
+        console.log(`      - ⚠️ IMPORTANTE: El servidor TURN debe tener abiertos los puertos UDP ${TURN_MEDIA_PORT_MIN}-${TURN_MEDIA_PORT_MAX} para transporte de media`);
+        console.log(`      - Estos puertos se usan para: Audio (RTP), Video (RTP), Pantalla compartida, RTCP (control)`);
       } else {
         console.log(`   ${index + 1}. STUN Server (Descubrimiento):`);
         console.log(`      - ${server.urls}`);
@@ -722,14 +749,34 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
           candidateType = "prflx"; // Peer reflexive
         }
         
-        // Extraer IP y puerto del candidato
+        // Extraer IP y puerto del candidato (formato SDP estándar)
+        // Formato: candidate:... 192.168.0.1 51742 typ host ...
+        const parts = candidateString.split(' ');
+        if (parts.length >= 6) {
+          ip = parts[4] || "N/A";
+          port = parts[5] || "N/A";
+        } else {
+          // Fallback al método anterior
         const ipMatch = candidateString.match(/(\d+\.\d+\.\d+\.\d+)/);
         if (ipMatch) {
           ip = ipMatch[1];
         }
-        const portMatch = candidateString.match(/port (\d+)/);
+          const portMatch = candidateString.match(/\s(\d+)\s+typ\s/);
         if (portMatch) {
           port = portMatch[1];
+          }
+        }
+        
+        // Validar puerto TURN si es candidato relay
+        if (isTurn && port !== "N/A") {
+          const portNum = parseInt(port, 10);
+          if (portNum >= TURN_MEDIA_PORT_MIN && portNum <= TURN_MEDIA_PORT_MAX) {
+            console.log(`✅ Puerto TURN ${port} está en el rango correcto (${TURN_MEDIA_PORT_MIN}-${TURN_MEDIA_PORT_MAX})`);
+          } else {
+            console.error(`❌ PROBLEMA: Puerto TURN ${port} está FUERA del rango esperado (${TURN_MEDIA_PORT_MIN}-${TURN_MEDIA_PORT_MAX})`);
+            console.error(`   Esto puede causar que el firewall bloquee el transporte de media`);
+            console.error(`   Verificar configuración del servidor TURN y firewall`);
+          }
         }
         
         // Log detallado del candidato
@@ -1115,8 +1162,64 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     };
   };
 
+  // Función para añadir tracks evitando duplicados
   const attachLocalTracks = (pc, stream) => {
-    stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+    console.log("2️⃣ ========== AÑADIENDO TRACKS LOCALES ==========");
+    const sendersAntes = pc.getSenders();
+    console.log(`2️⃣ [PC-${pcIdRef.current}] Senders ANTES de añadir:`, sendersAntes.map(s => ({
+      kind: s.track?.kind || "N/A",
+      id: s.track?.id || "N/A",
+      enabled: s.track?.enabled
+    })));
+    
+    stream.getTracks().forEach((track) => {
+      // Verificar si ya existe un sender con este track kind
+      const alreadyExists = pc.getSenders().some(s => 
+        s.track && s.track.kind === track.kind && s.track.id === track.id
+      );
+      
+      if (alreadyExists) {
+        console.warn(`2️⃣ [PC-${pcIdRef.current}] ⚠️ Track ${track.kind} (${track.id}) ya existe, NO se añade de nuevo`);
+        return; // No añadir si ya existe
+      }
+      
+      // Verificar si hay otro sender con el mismo kind (aunque sea otro track)
+      const hasSameKind = pc.getSenders().some(s => s.track && s.track.kind === track.kind);
+      if (hasSameKind) {
+        console.warn(`2️⃣ [PC-${pcIdRef.current}] ⚠️ Ya existe un sender de tipo ${track.kind}, reemplazando...`);
+        // Encontrar el sender existente y reemplazarlo
+        const existingSender = pc.getSenders().find(s => s.track && s.track.kind === track.kind);
+        if (existingSender && existingSender.replaceTrack) {
+          existingSender.replaceTrack(track);
+          console.log(`2️⃣ [PC-${pcIdRef.current}] ✅ Track ${track.kind} reemplazado en sender existente`);
+          return;
+        }
+      }
+      
+      // Si no existe, añadir normalmente
+      pc.addTrack(track, stream);
+      console.log(`2️⃣ [PC-${pcIdRef.current}] ✅ Track ${track.kind} (${track.id}) añadido`);
+    });
+    
+    const sendersDespues = pc.getSenders();
+    console.log(`2️⃣ [PC-${pcIdRef.current}] Senders DESPUÉS de añadir:`, sendersDespues.map(s => ({
+      kind: s.track?.kind || "N/A",
+      id: s.track?.id || "N/A",
+      enabled: s.track?.enabled
+    })));
+    
+    // Validar que solo tenemos audio y video (o solo audio si es llamada de audio)
+    const kinds = sendersDespues.map(s => s.track?.kind).filter(Boolean);
+    const uniqueKinds = [...new Set(kinds)];
+    console.log(`2️⃣ [PC-${pcIdRef.current}] Tipos únicos de tracks:`, uniqueKinds);
+    
+    if (uniqueKinds.length > 2 || (uniqueKinds.length === 2 && !uniqueKinds.includes("audio") && !uniqueKinds.includes("video"))) {
+      console.error(`2️⃣ [PC-${pcIdRef.current}] ❌ PROBLEMA: Hay ${uniqueKinds.length} tipos de tracks:`, uniqueKinds);
+      console.error(`2️⃣ [PC-${pcIdRef.current}] Se esperaba máximo 2: ["audio", "video"] o ["audio"]`);
+    } else {
+      console.log(`2️⃣ [PC-${pcIdRef.current}] ✅ Validación de tracks OK:`, uniqueKinds);
+    }
+    console.log("2️⃣ ============================================");
   };
 
   // Procesar cola de candidatos ICE (para añadir candidatos recibidos)
@@ -1214,13 +1317,13 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
           await pcRef.current.addIceCandidate(iceCandidate);
           
           const addDuration = Date.now() - addStartTime;
-          processed++;
+        processed++;
           console.log(`2️⃣ [PC-${currentPcId}] [Cola ${processed}/${queueLength}] ✅ addIceCandidate() EXITOSO`);
           console.log(`2️⃣   - Duración: ${addDuration}ms`);
           console.log(`2️⃣   - Estado después: iceConnectionState=${pcRef.current.iceConnectionState}`);
           console.log(`2️⃣ ==================================================`);
           
-          console.log(`✅ ICE candidate ${processed}/${queueLength} añadido de la cola`);
+        console.log(`✅ ICE candidate ${processed}/${queueLength} añadido de la cola`);
           
           // Verificar que se añadió correctamente después de un breve delay
           setTimeout(async () => {
@@ -1376,6 +1479,16 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
       return;
     }
 
+    // Verificar senders antes de crear offer
+    const sendersAntesOffer = pc.getSenders();
+    const kindsAntesOffer = sendersAntesOffer.map(s => s.track?.kind).filter(Boolean);
+    console.log(`2️⃣ [PC-${pcIdRef.current}] Senders ANTES de createOffer:`, kindsAntesOffer);
+    console.log(`2️⃣ [PC-${pcIdRef.current}] Tipos únicos:`, [...new Set(kindsAntesOffer)]);
+    
+    if (kindsAntesOffer.length !== [...new Set(kindsAntesOffer)].length) {
+      console.error(`2️⃣ [PC-${pcIdRef.current}] ❌ PROBLEMA: Hay tracks duplicados! Total: ${kindsAntesOffer.length}, Únicos: ${[...new Set(kindsAntesOffer)].length}`);
+    }
+
     // crear offer y setLocalDescription
     console.log("📞 Creando offer...");
     let offer;
@@ -1385,6 +1498,37 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
         type: offer.type,
         sdp: offer.sdp ? offer.sdp.substring(0, 100) + "..." : "sin SDP"
       });
+      
+      // 2️⃣ LOG DIAGNÓSTICO: Verificar líneas m= del SDP del offer
+      if (offer.sdp) {
+        const mediaLines = offer.sdp.match(/^m=/gm);
+        const mediaCount = mediaLines ? mediaLines.length : 0;
+        console.log(`2️⃣ [PC-${pcIdRef.current}] ========== VALIDACIÓN SDP OFFER ==========`);
+        console.log(`2️⃣ [PC-${pcIdRef.current}] Líneas de media (m=): ${mediaCount}`);
+        
+        if (mediaCount > 0) {
+          const lines = offer.sdp.split('\n');
+          const mLines = lines.filter(line => line.startsWith('m='));
+          mLines.forEach((line, index) => {
+            console.log(`2️⃣ [PC-${pcIdRef.current}]   ${index + 1}. ${line.trim()}`);
+          });
+          
+          // Validar que no haya duplicados de m=audio
+          const audioLines = mLines.filter(line => line.includes('m=audio'));
+          const videoLines = mLines.filter(line => line.includes('m=video'));
+          
+          if (audioLines.length > 1) {
+            console.error(`2️⃣ [PC-${pcIdRef.current}] ❌ PROBLEMA: Hay ${audioLines.length} líneas m=audio (debe ser 1)`);
+          }
+          if (videoLines.length > 1 && mode === "video") {
+            console.error(`2️⃣ [PC-${pcIdRef.current}] ❌ PROBLEMA: Hay ${videoLines.length} líneas m=video (debe ser 1)`);
+          }
+          if (mode === "video" && videoLines.length === 0) {
+            console.error(`2️⃣ [PC-${pcIdRef.current}] ❌ PROBLEMA: Es llamada video pero NO hay línea m=video`);
+          }
+        }
+        console.log(`2️⃣ [PC-${pcIdRef.current}] ===========================================`);
+      }
       
       await pc.setLocalDescription(offer);
       console.log("📞 LocalDescription establecido, estado:", pc.signalingState);
@@ -1723,6 +1867,16 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
       // Continuar sin media local si falla (el otro usuario verá/escuchará, pero no al revés)
     }
 
+    // Verificar senders antes de crear answer
+    const sendersAntesAnswer = pc.getSenders();
+    const kindsAntesAnswer = sendersAntesAnswer.map(s => s.track?.kind).filter(Boolean);
+    console.log(`2️⃣ [PC-${pcIdRef.current}] Senders ANTES de createAnswer:`, kindsAntesAnswer);
+    console.log(`2️⃣ [PC-${pcIdRef.current}] Tipos únicos:`, [...new Set(kindsAntesAnswer)]);
+    
+    if (kindsAntesAnswer.length !== [...new Set(kindsAntesAnswer)].length) {
+      console.error(`2️⃣ [PC-${pcIdRef.current}] ❌ PROBLEMA: Hay tracks duplicados! Total: ${kindsAntesAnswer.length}, Únicos: ${[...new Set(kindsAntesAnswer)].length}`);
+    }
+
     // crear answer y enviarla
     console.log("📞 Creando answer...");
     try {
@@ -1731,6 +1885,34 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
         type: answer.type,
         sdp: answer.sdp ? answer.sdp.substring(0, 100) + "..." : "sin SDP"
       });
+      
+      // 2️⃣ LOG DIAGNÓSTICO: Verificar líneas m= del SDP del answer
+      if (answer.sdp) {
+        const mediaLines = answer.sdp.match(/^m=/gm);
+        const mediaCount = mediaLines ? mediaLines.length : 0;
+        console.log(`2️⃣ [PC-${pcIdRef.current}] ========== VALIDACIÓN SDP ANSWER ==========`);
+        console.log(`2️⃣ [PC-${pcIdRef.current}] Líneas de media (m=): ${mediaCount}`);
+        
+        if (mediaCount > 0) {
+          const lines = answer.sdp.split('\n');
+          const mLines = lines.filter(line => line.startsWith('m='));
+          mLines.forEach((line, index) => {
+            console.log(`2️⃣ [PC-${pcIdRef.current}]   ${index + 1}. ${line.trim()}`);
+          });
+          
+          // Validar que no haya duplicados de m=audio
+          const audioLines = mLines.filter(line => line.includes('m=audio'));
+          const videoLines = mLines.filter(line => line.includes('m=video'));
+          
+          if (audioLines.length > 1) {
+            console.error(`2️⃣ [PC-${pcIdRef.current}] ❌ PROBLEMA: Hay ${audioLines.length} líneas m=audio (debe ser 1)`);
+          }
+          if (videoLines.length > 1 && mode === "video") {
+            console.error(`2️⃣ [PC-${pcIdRef.current}] ❌ PROBLEMA: Hay ${videoLines.length} líneas m=video (debe ser 1)`);
+          }
+        }
+        console.log(`2️⃣ [PC-${pcIdRef.current}] ===========================================`);
+      }
       
       await pc.setLocalDescription(answer);
       console.log("✅ LocalDescription establecido, signalingState:", pc.signalingState);
@@ -1844,14 +2026,24 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
       candidateType = "prflx";
     }
     
-    // Extraer IP y puerto
+    // Extraer IP y puerto correctamente del formato SDP
+    // Formato: candidate:... 192.168.0.1 51742 typ host ...
+    //          parts[0] = foundation, parts[1] = component, parts[2] = protocol,
+    //          parts[3] = priority, parts[4] = IP, parts[5] = port
+    const parts = candidateString.split(' ');
+    if (parts.length >= 6) {
+      ip = parts[4] || "N/A";
+      port = parts[5] || "N/A";
+    } else {
+      // Fallback al método anterior si el formato no es estándar
     const ipMatch = candidateString.match(/(\d+\.\d+\.\d+\.\d+)/);
     if (ipMatch) {
       ip = ipMatch[1];
     }
-    const portMatch = candidateString.match(/port (\d+)/);
+      const portMatch = candidateString.match(/\s(\d+)\s+typ\s/);
     if (portMatch) {
       port = portMatch[1];
+      }
     }
     
     receivedCandidatesCountRef.current++;
@@ -2059,9 +2251,9 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
           console.log(`2️⃣   - Estado después: iceConnectionState=${pc.iceConnectionState}, signalingState=${pc.signalingState}`);
           console.log("2️⃣ ==================================================");
           
-          console.log(`✅ ICE candidate #${receivedCandidatesCountRef.current} añadido correctamente al PeerConnection`);
-          console.log("📞 ICE Connection State después de añadir:", pc.iceConnectionState);
-          
+        console.log(`✅ ICE candidate #${receivedCandidatesCountRef.current} añadido correctamente al PeerConnection`);
+        console.log("📞 ICE Connection State después de añadir:", pc.iceConnectionState);
+        
           // DIAGNÓSTICO: Verificar periódicamente getStats() después de añadir candidatos
           // Solo para los primeros 3 candidatos para no saturar
           if (receivedCandidatesCountRef.current <= 3 || receivedCandidatesCountRef.current % 5 === 0) {
