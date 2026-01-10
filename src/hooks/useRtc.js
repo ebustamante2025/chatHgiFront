@@ -1438,14 +1438,9 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
     setTimeout(async () => {
       await logCallInfo(pc, "caller", mode, toUser);
     }, 500); // Esperar un poco para que se generen algunos candidatos
-    
-    console.log("📞 Creando DataChannel...");
-    const dc = pc.createDataChannel("data");
-    dataChannelRef.current = dc;
-    setupDataChannel(dc);
-    console.log("📞 DataChannel creado");
 
-    // obtener media local (puede pedir permisos)
+    // IMPORTANTE: Obtener media PRIMERO, luego crear DataChannel
+    // Esto evita que el DataChannel cree transceivers adicionales que dupliquen las líneas m=
     console.log("📞 Solicitando permisos de media (modo:", mode, ")...");
     try {
       const stream = await getMediaStream(mode);
@@ -1453,6 +1448,25 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
       localStreamRef.current = stream;
       attachLocalTracks(pc, stream);
       console.log("📞 Tracks locales añadidos al PeerConnection");
+      
+      // Verificar que solo tenemos los tracks correctos antes de crear DataChannel
+      const sendersDespuesTracks = pc.getSenders();
+      const transceiversDespuesTracks = pc.getTransceivers();
+      console.log(`2️⃣ [PC-${pcIdRef.current}] Después de añadir tracks - Senders: ${sendersDespuesTracks.length}, Transceivers: ${transceiversDespuesTracks.length}`);
+      
+      // Crear DataChannel DESPUÉS de añadir tracks
+      console.log("📞 Creando DataChannel...");
+      const dc = pc.createDataChannel("data");
+      dataChannelRef.current = dc;
+      setupDataChannel(dc);
+      console.log("📞 DataChannel creado");
+      
+      // Verificar que el DataChannel no haya creado transceivers adicionales
+      const transceiversDespuesDC = pc.getTransceivers();
+      console.log(`2️⃣ [PC-${pcIdRef.current}] Después de crear DataChannel - Transceivers: ${transceiversDespuesDC.length}`);
+      if (transceiversDespuesDC.length > transceiversDespuesTracks.length) {
+        console.warn(`2️⃣ [PC-${pcIdRef.current}] ⚠️ DataChannel creó ${transceiversDespuesDC.length - transceiversDespuesTracks.length} transceivers adicionales`);
+      }
     } catch (err) {
       const errorCode = err.name === "NotAllowedError" || err.name === "PermissionDeniedError"
         ? ErrorCodes.MEDIA_ACCESS_DENIED
@@ -1479,11 +1493,73 @@ export function useRtc(wsRef, localUser, callbacks = {}) {
       return;
     }
 
-    // Verificar senders antes de crear offer
+    // Verificar senders y transceivers antes de crear offer
     const sendersAntesOffer = pc.getSenders();
+    const transceiversAntesOffer = pc.getTransceivers();
     const kindsAntesOffer = sendersAntesOffer.map(s => s.track?.kind).filter(Boolean);
-    console.log(`2️⃣ [PC-${pcIdRef.current}] Senders ANTES de createOffer:`, kindsAntesOffer);
-    console.log(`2️⃣ [PC-${pcIdRef.current}] Tipos únicos:`, [...new Set(kindsAntesOffer)]);
+    const transceiverKinds = transceiversAntesOffer.map(t => t.receiver?.track?.kind || t.sender?.track?.kind || "N/A").filter(k => k !== "N/A");
+    
+    console.log(`2️⃣ [PC-${pcIdRef.current}] ========== VALIDACIÓN ANTES DE CREATEOFFER ==========`);
+    console.log(`2️⃣ [PC-${pcIdRef.current}] Senders:`, kindsAntesOffer);
+    console.log(`2️⃣ [PC-${pcIdRef.current}] Transceivers:`, transceiverKinds);
+    console.log(`2️⃣ [PC-${pcIdRef.current}] Total senders: ${sendersAntesOffer.length}, Total transceivers: ${transceiversAntesOffer.length}`);
+    
+    // Contar tipos únicos
+    const audioSenders = kindsAntesOffer.filter(k => k === "audio").length;
+    const videoSenders = kindsAntesOffer.filter(k => k === "video").length;
+    const audioTransceivers = transceiverKinds.filter(k => k === "audio").length;
+    const videoTransceivers = transceiverKinds.filter(k => k === "video").length;
+    
+    console.log(`2️⃣ [PC-${pcIdRef.current}] Audio senders: ${audioSenders}, Video senders: ${videoSenders}`);
+    console.log(`2️⃣ [PC-${pcIdRef.current}] Audio transceivers: ${audioTransceivers}, Video transceivers: ${videoTransceivers}`);
+    
+    // PROBLEMA CRÍTICO: Si hay más de 1 transceiver de audio, limpiar los duplicados
+    if (audioTransceivers > 1) {
+      console.error(`2️⃣ [PC-${pcIdRef.current}] ❌ PROBLEMA CRÍTICO: Hay ${audioTransceivers} transceivers de audio (debe ser 1)`);
+      console.error(`2️⃣ [PC-${pcIdRef.current}] Esto causará ${audioTransceivers} líneas m=audio en el SDP`);
+      console.error(`2️⃣ [PC-${pcIdRef.current}] Limpiando transceivers duplicados...`);
+      
+      // Encontrar y detener transceivers de audio duplicados (mantener solo el primero)
+      let audioCount = 0;
+      transceiversAntesOffer.forEach((transceiver, index) => {
+        const kind = transceiver.receiver?.track?.kind || transceiver.sender?.track?.kind;
+        if (kind === "audio") {
+          audioCount++;
+          if (audioCount > 1) {
+            console.log(`2️⃣ [PC-${pcIdRef.current}] Deteniendo transceiver de audio duplicado #${audioCount} (índice ${index})`);
+            transceiver.stop();
+          }
+        }
+      });
+    }
+    
+    if (videoTransceivers > 1 && mode === "video") {
+      console.error(`2️⃣ [PC-${pcIdRef.current}] ❌ PROBLEMA CRÍTICO: Hay ${videoTransceivers} transceivers de video (debe ser 1)`);
+      console.error(`2️⃣ [PC-${pcIdRef.current}] Limpiando transceivers duplicados...`);
+      
+      let videoCount = 0;
+      transceiversAntesOffer.forEach((transceiver, index) => {
+        const kind = transceiver.receiver?.track?.kind || transceiver.sender?.track?.kind;
+        if (kind === "video") {
+          videoCount++;
+          if (videoCount > 1) {
+            console.log(`2️⃣ [PC-${pcIdRef.current}] Deteniendo transceiver de video duplicado #${videoCount} (índice ${index})`);
+            transceiver.stop();
+          }
+        }
+      });
+    }
+    
+    // Verificar nuevamente después de limpiar
+    const sendersDespuesLimpieza = pc.getSenders();
+    const transceiversDespuesLimpieza = pc.getTransceivers();
+    const kindsDespuesLimpieza = sendersDespuesLimpieza.map(s => s.track?.kind).filter(Boolean);
+    const transceiverKindsDespues = transceiversDespuesLimpieza.map(t => t.receiver?.track?.kind || t.sender?.track?.kind || "N/A").filter(k => k !== "N/A");
+    
+    console.log(`2️⃣ [PC-${pcIdRef.current}] DESPUÉS de limpieza - Senders:`, kindsDespuesLimpieza);
+    console.log(`2️⃣ [PC-${pcIdRef.current}] DESPUÉS de limpieza - Transceivers:`, transceiverKindsDespues);
+    console.log(`2️⃣ [PC-${pcIdRef.current}] Total senders: ${sendersDespuesLimpieza.length}, Total transceivers: ${transceiversDespuesLimpieza.length}`);
+    console.log(`2️⃣ [PC-${pcIdRef.current}] ==================================================`);
     
     if (kindsAntesOffer.length !== [...new Set(kindsAntesOffer)].length) {
       console.error(`2️⃣ [PC-${pcIdRef.current}] ❌ PROBLEMA: Hay tracks duplicados! Total: ${kindsAntesOffer.length}, Únicos: ${[...new Set(kindsAntesOffer)].length}`);
